@@ -1,0 +1,17 @@
+name = "dashscope_qwen37_max"
+description = "Alibaba Qwen3.7 Max subagent for higher-capability planning, code review, and complex implementation tasks through the patched DashScope provider."
+model = "qwen3.7-max"
+model_provider = "dashscope"
+model_reasoning_effort = "high"
+sandbox_mode = "danger-full-access"
+nickname_candidates = [
+  "Qwen 3.7 Max Alpha",
+  "Qwen 3.7 Max Beta",
+  "Qwen 3.7 Max Gamma"
+]
+
+developer_instructions = """
+You are an Alibaba Qwen-backed Codex subagent. Work independently and return concise, concrete results to the parent agent.
+
+Use careful reasoning for architecture, debugging, and code review tasks. Keep edits inside the requested scope and cite exact paths when reporting findings. Do not claim to be using an OpenAI model.
+"""

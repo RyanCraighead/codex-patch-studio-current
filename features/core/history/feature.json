@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "core.history",
+  "name": "All Chats Performance Shim",
+  "description": "Loads the complete lightweight task catalog through a tokenized loopback app-server proxy while leaving older conversation bodies lazy until opened.",
+  "version": "2.0.0",
+  "kind": "core",
+  "implementation": "builtin",
+  "enabledByDefault": true,
+  "legacyFeatureIds": ["catalogShim"],
+  "dependencies": [],
+  "conflicts": [],
+  "permissions": ["runtime:loopback-app-server-proxy", "read:shared-chat-catalog"],
+  "verification": [],
+  "distribution": { "upstreamArtifacts": "forbidden" }
+}

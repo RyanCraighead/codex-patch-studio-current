@@ -1,0 +1,4 @@
+interface:
+  display_name: "Contribute to Codex Patch Studio"
+  short_description: "Build and submit source-only patcher feature contributions."
+  default_prompt: "Implement a Codex Patch Studio contribution in an isolated worktree, run source-only and compatibility validation, and prepare a reviewable pull request."

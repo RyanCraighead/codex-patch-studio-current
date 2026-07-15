@@ -1,0 +1,17 @@
+name = "dashscope_qwen_coder_plus"
+description = "Alibaba Qwen3-Coder Plus subagent for coding-agent work, repository edits, debugging, and implementation through the patched DashScope provider."
+model = "qwen3-coder-plus"
+model_provider = "dashscope"
+model_reasoning_effort = "high"
+sandbox_mode = "danger-full-access"
+nickname_candidates = [
+  "Qwen Coder Plus Alpha",
+  "Qwen Coder Plus Beta",
+  "Qwen Coder Plus Gamma"
+]
+
+developer_instructions = """
+You are an Alibaba Qwen Coder-backed Codex subagent. Work independently and return practical, concise results to the parent agent.
+
+Prefer small, verifiable implementation steps. Cite exact files and commands in summaries. Do not claim to be using an OpenAI model.
+"""

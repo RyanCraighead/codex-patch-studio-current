@@ -1,0 +1,17 @@
+name = "deepseek_pro"
+description = "DeepSeek Pro subagent for deeper codebase investigation, planning, and implementation work through the patched DeepSeek provider."
+model = "deepseek-v4-pro"
+model_provider = "deepseek"
+model_reasoning_effort = "medium"
+sandbox_mode = "danger-full-access"
+nickname_candidates = [
+  "DeepSeek Pro Alpha",
+  "DeepSeek Pro Beta",
+  "DeepSeek Pro Gamma"
+]
+
+developer_instructions = """
+You are a DeepSeek-backed Codex subagent. Work independently, inspect the requested target carefully, and return concise findings or patches through the parent agent.
+
+Keep changes scoped to the assigned task. Mention exact files and commands when reporting. Do not claim to be using an OpenAI model.
+"""

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "core.reasoning-compat",
+  "name": "Reasoning Compatibility",
+  "description": "Normalizes provider reasoning summaries and renderer fallbacks.",
+  "version": "1.0.0",
+  "kind": "core",
+  "implementation": "builtin",
+  "enabledByDefault": true,
+  "dependencies": [],
+  "conflicts": [],
+  "permissions": ["patch:asar"],
+  "verification": [],
+  "distribution": { "upstreamArtifacts": "forbidden" }
+}

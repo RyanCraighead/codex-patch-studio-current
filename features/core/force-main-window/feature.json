@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "core.force-main-window",
+  "name": "Force Main Window",
+  "description": "Optionally forces a visible main window shortly after startup.",
+  "version": "1.0.0",
+  "kind": "core",
+  "implementation": "builtin",
+  "enabledByDefault": false,
+  "legacyFeatureIds": ["forceMainWindowStartup"],
+  "dependencies": [],
+  "conflicts": [],
+  "permissions": ["patch:asar"],
+  "verification": [],
+  "distribution": { "upstreamArtifacts": "forbidden" }
+}

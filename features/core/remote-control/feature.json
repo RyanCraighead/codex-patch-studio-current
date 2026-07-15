@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "core.remote-control",
+  "name": "Remote Control",
+  "description": "Enables the app-server remote-control capability and its native setting.",
+  "version": "1.0.0",
+  "kind": "core",
+  "implementation": "builtin",
+  "enabledByDefault": true,
+  "legacyFeatureIds": ["remoteControl", "remoteControlSettings"],
+  "dependencies": [],
+  "conflicts": [],
+  "permissions": ["patch:asar"],
+  "verification": [],
+  "distribution": { "upstreamArtifacts": "forbidden" }
+}

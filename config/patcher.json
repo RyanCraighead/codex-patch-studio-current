@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "productName": "Codex Patch Studio Current",
+  "sourceMode": "current-installed",
+  "autoRebuildOnLaunch": false,
+  "updatePolicy": "notify",
+  "updatePolicyConfigured": false,
+  "outputRoot": "%LOCALAPPDATA%\\CodexPatchStudioCurrent\\builds",
+  "patchedCodexHome": "%USERPROFILE%\\.codex-patch-studio-current",
+  "shareChatDatabaseWithStock": true,
+  "featureRoots": [],
+  "featureModules": {},
+  "chatLimit": 1000,
+  "catalogShimPort": 47851,
+  "catalogShimMaxThreads": 10000,
+  "shortcutName": "Codex Patch Studio Current"
+}

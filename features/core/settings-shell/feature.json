@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "core.settings-shell",
+  "name": "Native Settings Shell",
+  "description": "Provides native settings routes, navigation, icons, and local bridge connectivity.",
+  "version": "1.0.0",
+  "kind": "core",
+  "implementation": "builtin",
+  "enabledByDefault": true,
+  "dependencies": [],
+  "conflicts": [],
+  "permissions": ["patch:asar"],
+  "verification": [],
+  "distribution": { "upstreamArtifacts": "forbidden" }
+}

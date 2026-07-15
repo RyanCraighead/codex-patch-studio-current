@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "core.orchestrations",
+  "name": "Orchestrations",
+  "description": "Adds project-independent orchestration chats and project-spawned tasks.",
+  "version": "1.0.0",
+  "kind": "core",
+  "implementation": "builtin",
+  "enabledByDefault": true,
+  "legacyFeatureIds": ["nativeOrchestrator"],
+  "dependencies": ["core.settings-shell"],
+  "conflicts": [],
+  "permissions": ["patch:asar", "bridge:loopback"],
+  "verification": [],
+  "distribution": { "upstreamArtifacts": "forbidden" }
+}

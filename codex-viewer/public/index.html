@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b0d12">
+    <title>Codex Project Viewer</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-frame">
+      <header class="app-header">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span><span></span>
+          </div>
+          <div class="brand-copy">
+            <div class="brand-line">
+              <h1>Codex</h1>
+              <span class="product-label">Project Viewer</span>
+            </div>
+            <p>Local projects, conversations, orchestrations, and patch builds.</p>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <div id="connectionStatus" class="connection-status is-loading" role="status" aria-live="polite">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="connectionStatusText">Connecting</span>
+          </div>
+          <nav class="view-tabs" role="tablist" aria-label="Viewer sections">
+            <button class="view-tab is-active" type="button" role="tab" data-view-target="chats" aria-controls="chatView" aria-selected="true" aria-pressed="true">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v11H8l-4 3v-14Z"></path></svg>
+              <span>Workspace</span>
+            </button>
+            <button class="view-tab" type="button" role="tab" data-view-target="patches" aria-controls="patchView" aria-selected="false" aria-pressed="false" tabindex="-1">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m14.7 6.3 3-3 3 3-3 3m-8.4 8.4-3 3-3-3 3-3M5 19 19 5"></path></svg>
+              <span>Patch Manager</span>
+            </button>
+          </nav>
+          <button id="shortcutsButton" class="icon-button" type="button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"></rect><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h6M17 14h.01"></path></svg>
+          </button>
+        </div>
+      </header>
+
+      <main id="chatView" class="shell app-view is-active">
+        <aside class="projects pane" aria-label="Projects">
+          <header class="pane-header">
+            <div class="pane-heading">
+              <span class="eyebrow">Workspace</span>
+              <h2>Projects</h2>
+              <p id="summaryText">Loading Codex state</p>
+            </div>
+            <div class="pane-actions">
+              <button id="orchestratorToggle" class="button-secondary button-compact" type="button" aria-expanded="false" aria-controls="orchestratorPanel">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+                <span>New run</span>
+              </button>
+              <button id="refreshButton" class="icon-button" type="button" aria-label="Refresh projects" title="Refresh projects">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 9A7 7 0 0 1 18 6l2 2M17.9 15A7 7 0 0 1 6 18l-2-2"></path></svg>
+              </button>
+            </div>
+          </header>
+
+          <section id="orchestratorPanel" class="orchestrator" aria-labelledby="orchestratorTitle" aria-hidden="true">
+            <div class="orchestrator-heading">
+              <div>
+                <span class="eyebrow">Orchestrator</span>
+                <h3 id="orchestratorTitle">Fan out a run</h3>
+              </div>
+              <button id="orchestratorClose" class="icon-button button-small" type="button" aria-label="Close run composer">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+              </button>
+            </div>
+            <label class="field-row">
+              <span>Run title</span>
+              <input id="orchestrationTitle" type="text" placeholder="Give this run a name" autocomplete="off">
+            </label>
+            <label class="field-row">
+              <span>Task</span>
+              <textarea id="orchestrationPrompt" rows="4" placeholder="Describe the work to fan out across selected projects"></textarea>
+            </label>
+            <div class="selection-toolbar">
+              <span id="orchestrationSelection">0 selected</span>
+              <div class="inline-actions">
+                <button id="selectVisibleProjectsButton" class="text-button" type="button">Select shown</button>
+                <button id="clearProjectSelectionButton" class="text-button" type="button">Clear</button>
+              </div>
+            </div>
+            <label class="toggle control-toggle">
+              <input id="orchestrationStartTurns" type="checkbox" checked>
+              <span>Start child turns immediately</span>
+            </label>
+            <div class="orchestrator-actions">
+              <button id="matchProjectsButton" class="button-secondary" type="button">Match names</button>
+              <button id="previewOrchestrationButton" class="button-secondary" type="button">Preview</button>
+              <button id="startOrchestrationButton" class="button-primary" type="button">Review &amp; create</button>
+            </div>
+            <div id="orchestrationStatus" class="status-line" role="status" aria-live="polite"></div>
+            <div id="orchestrationRuns" class="run-list"></div>
+          </section>
+
+          <div class="rail-toolbar">
+            <label class="search-field">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path></svg>
+              <span class="sr-only">Search projects or paths</span>
+              <input id="projectSearch" type="search" placeholder="Search projects or paths" autocomplete="off">
+              <button id="projectSearchClear" class="search-clear" type="button" aria-label="Clear project search" hidden>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"></path></svg>
+              </button>
+            </label>
+            <div class="list-controls">
+              <span id="projectCountLabel">0 projects</span>
+              <label class="compact-select">
+                <span class="sr-only">Sort projects</span>
+                <select id="projectSort" aria-label="Sort projects">
+                  <option value="recent">Recently updated</option>
+                  <option value="name">Name</option>
+                  <option value="chats">Most chats</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div id="projectList" class="scroll-list" role="list" aria-label="Codex projects"></div>
+        </aside>
+
+        <section class="threads pane" aria-label="Conversations">
+          <header class="pane-header">
+            <div class="pane-heading">
+              <span class="eyebrow">Project</span>
+              <h2 id="projectTitle">Select a project</h2>
+              <p id="projectPath">No project selected</p>
+            </div>
+          </header>
+          <div class="rail-toolbar thread-toolbar">
+            <label class="search-field">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path></svg>
+              <span class="sr-only">Search conversations</span>
+              <input id="threadSearch" type="search" placeholder="Search conversations" autocomplete="off">
+              <button id="threadSearchClear" class="search-clear" type="button" aria-label="Clear conversation search" hidden>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"></path></svg>
+              </button>
+            </label>
+            <div class="thread-filter-row" role="group" aria-label="Conversation filters">
+              <label class="filter-toggle">
+                <input id="includeSubagents" type="checkbox">
+                <span>Subagents</span>
+              </label>
+              <label class="filter-toggle">
+                <input id="includeApprovals" type="checkbox">
+                <span>Approvals</span>
+              </label>
+              <span id="threadCountLabel" class="filter-count">0 conversations</span>
+            </div>
+          </div>
+          <div class="thread-head" aria-hidden="true">
+            <span>Conversation</span>
+            <span>Activity</span>
+          </div>
+          <div id="threadList" class="scroll-list" role="list" aria-label="Project conversations"></div>
+        </section>
+
+        <section class="conversation pane" aria-label="Conversation detail">
+          <header class="conversation-header">
+            <div class="conversation-heading">
+              <div id="threadKicker" class="kicker">No chat selected</div>
+              <h2 id="threadTitle">Select a Codex chat</h2>
+              <p id="threadMeta">The viewer reads Codex project records and rollout logs locally.</p>
+            </div>
+            <div class="conversation-actions">
+              <label class="filter-toggle" title="Show or hide reasoning summaries">
+                <input id="showReasoning" type="checkbox" checked>
+                <span>Reasoning</span>
+              </label>
+              <button id="conversationToolsToggle" class="button-secondary button-compact" type="button" disabled>Expand tools</button>
+              <button id="copyThreadButton" class="icon-button" type="button" aria-label="Copy conversation details" title="Copy conversation details" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"></path></svg>
+              </button>
+              <button id="focusModeButton" class="button-secondary button-compact" type="button" aria-pressed="false" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"></path></svg>
+                <span>Focus</span>
+              </button>
+            </div>
+          </header>
+          <div id="conversationBody" class="conversation-body">
+            <div class="empty-state">
+              <span class="empty-icon" aria-hidden="true">⌁</span>
+              <strong>Choose a conversation</strong>
+              <span>Pick a project and chat to inspect messages, reasoning, tool calls, outputs, and saved patch diffs.</span>
+            </div>
+          </div>
+          <div class="conversation-jump" aria-label="Conversation navigation">
+            <button id="conversationTopButton" class="icon-button" type="button" aria-label="Jump to top" title="Jump to top" disabled>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"></path></svg>
+            </button>
+            <button id="conversationBottomButton" class="icon-button" type="button" aria-label="Jump to bottom" title="Jump to bottom" disabled>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+            </button>
+          </div>
+        </section>
+      </main>
+
+      <main id="patchView" class="patch-shell app-view">
+        <aside class="patch-config pane" aria-label="Patch configuration">
+          <header class="pane-header">
+            <div class="pane-heading">
+              <span class="eyebrow">Builds</span>
+              <h2>Patch configuration</h2>
+              <p>Choose native features, source, and output.</p>
+            </div>
+            <div class="pane-actions">
+              <button id="patchResetButton" class="button-secondary button-compact" type="button">Reset</button>
+              <button id="patchRefreshButton" class="icon-button" type="button" aria-label="Refresh patch state" title="Refresh patch state">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 9A7 7 0 0 1 18 6l2 2M17.9 15A7 7 0 0 1 6 18l-2-2"></path></svg>
+              </button>
+            </div>
+          </header>
+          <div class="patch-form scroll-list">
+            <section class="patch-section">
+              <div class="section-heading">
+                <div>
+                  <span class="section-label">Native features</span>
+                  <span id="patchFeatureCount" class="section-meta">Loading</span>
+                </div>
+                <div class="inline-actions">
+                  <button id="patchSelectAllButton" class="text-button" type="button">All</button>
+                  <button id="patchDefaultsButton" class="text-button" type="button">Defaults</button>
+                  <button id="patchSelectNoneButton" class="text-button" type="button">None</button>
+                </div>
+              </div>
+              <div id="patchFeatureList" class="patch-feature-list"></div>
+            </section>
+
+            <details class="settings-group" open>
+              <summary>
+                <span>Build options</span>
+                <small>Source and destination</small>
+              </summary>
+              <div class="settings-group-body">
+                <label class="field-row">
+                  <span>Chat load limit</span>
+                  <input id="patchLimit" type="number" min="50" max="10000" step="50" value="1000">
+                </label>
+                <label class="field-row">
+                  <span>Source</span>
+                  <select id="patchSourceMode">
+                    <option value="current">Current installed Codex</option>
+                    <option value="manual">Manual app directory</option>
+                  </select>
+                </label>
+                <div id="patchManualFields" class="conditional-fields" hidden>
+                  <label class="field-row">
+                    <span>Source app directory</span>
+                    <input id="patchSourceAppDir" type="text" placeholder="Path to the Codex app directory">
+                  </label>
+                  <label class="field-row">
+                    <span>Source app.asar <small>Optional</small></span>
+                    <input id="patchSourceAsar" type="text" placeholder="Path to app.asar">
+                  </label>
+                </div>
+                <label class="field-row">
+                  <span>Output root</span>
+                  <input id="patchOutputRoot" type="text">
+                </label>
+              </div>
+            </details>
+
+            <details class="settings-group">
+              <summary>
+                <span>Launcher</span>
+                <small>Shortcut and temporary files</small>
+              </summary>
+              <div class="settings-group-body">
+                <label class="field-row">
+                  <span>Shortcut name</span>
+                  <input id="patchShortcutName" type="text" value="Codex Patch Studio Current">
+                </label>
+                <label class="field-row">
+                  <span>Shortcut directory <small>Desktop by default</small></span>
+                  <input id="patchShortcutDir" type="text" placeholder="Optional destination directory">
+                </label>
+                <label class="toggle control-toggle">
+                  <input id="patchKeepWork" type="checkbox">
+                  <span>Keep temporary ASAR work directory</span>
+                </label>
+              </div>
+            </details>
+
+            <details class="settings-group">
+              <summary>
+                <span>Single EXE bundle</span>
+                <small>Portable distribution</small>
+              </summary>
+              <div class="settings-group-body">
+                <label class="field-row">
+                  <span>Bundle output directory</span>
+                  <input id="bundleOutputDirectory" type="text">
+                </label>
+                <label class="field-row">
+                  <span>Bundle name <small>Timestamped by default</small></span>
+                  <input id="bundleName" type="text" placeholder="Optional bundle name">
+                </label>
+                <label class="toggle control-toggle">
+                  <input id="bundlePortableElectronProfile" type="checkbox">
+                  <span>Use a portable Electron profile</span>
+                </label>
+                <label class="toggle control-toggle">
+                  <input id="bundleKeepWork" type="checkbox">
+                  <span>Keep bundle staging files</span>
+                </label>
+                <div class="patch-actions bundle-actions">
+                  <button id="bundlePreviewButton" class="button-secondary" type="button">Preview EXE</button>
+                  <button id="bundleBuildButton" class="button-primary" type="button">Build single EXE</button>
+                </div>
+              </div>
+            </details>
+
+            <div class="patch-actions patch-primary-actions">
+              <button id="patchPreviewButton" class="button-secondary" type="button">Preview patch</button>
+              <button id="patchBuildButton" class="button-primary" type="button">Build patch</button>
+              <button id="patchLaunchButton" class="button-secondary" type="button">Launch current</button>
+            </div>
+            <div id="patchStatusLine" class="status-line" role="status" aria-live="polite"></div>
+          </div>
+        </aside>
+
+        <section class="patch-overview pane" aria-label="Current build and jobs">
+          <header class="pane-header">
+            <div class="pane-heading">
+              <span class="eyebrow">Current build</span>
+              <h2>Patched Codex</h2>
+              <p id="patchCurrentSummary">Loading patch state</p>
+            </div>
+          </header>
+          <div class="patch-main-scroll">
+            <section class="patch-section">
+              <div class="section-heading">
+                <span class="section-label">Launcher configuration</span>
+              </div>
+              <div id="patchCurrentConfig" class="patch-info"></div>
+            </section>
+            <section class="patch-section">
+              <div class="section-heading">
+                <span class="section-label">Command preview</span>
+                <button id="copyPreviewButton" class="text-button" type="button" disabled>Copy command</button>
+              </div>
+              <pre id="patchPreviewOutput" class="patch-command">No preview yet.</pre>
+            </section>
+            <section class="patch-section jobs-section">
+              <div class="section-heading">
+                <span class="section-label">Build jobs</span>
+                <span id="patchJobCount" class="section-meta">0 jobs</span>
+              </div>
+              <div id="patchJobList" class="patch-job-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="patch-log pane" aria-label="Build job log">
+          <header class="pane-header">
+            <div class="pane-heading">
+              <span class="eyebrow">Output</span>
+              <h2 id="patchLogTitle">Job log</h2>
+              <p id="patchLogMeta">Select or start a patch job to view logs.</p>
+            </div>
+            <button id="copyLogButton" class="icon-button" type="button" aria-label="Copy job log" title="Copy job log" disabled>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"></path></svg>
+            </button>
+          </header>
+          <pre id="patchLogOutput" class="patch-log-output">No patch job selected.</pre>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="orchestrationPreviewDialog" class="preview-dialog" aria-labelledby="orchestrationPreviewTitle">
+      <div class="dialog-header">
+        <div>
+          <span class="eyebrow">Orchestration review</span>
+          <h2 id="orchestrationPreviewTitle">Review child chats</h2>
+          <p id="orchestrationPreviewMeta">Confirm the generated tasks before anything is created.</p>
+        </div>
+        <button id="orchestrationPreviewClose" class="icon-button" type="button" aria-label="Close orchestration preview">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+        </button>
+      </div>
+      <div id="orchestrationPreviewBody" class="preview-body"></div>
+      <div class="dialog-actions">
+        <button id="orchestrationPreviewCancel" class="button-secondary" type="button">Keep editing</button>
+        <button id="orchestrationPreviewConfirm" class="button-primary" type="button">Create chats</button>
+      </div>
+    </dialog>
+
+    <dialog id="shortcutsDialog" class="shortcut-dialog" aria-labelledby="shortcutsTitle">
+      <div class="dialog-header">
+        <div>
+          <span class="eyebrow">Navigation</span>
+          <h2 id="shortcutsTitle">Keyboard shortcuts</h2>
+        </div>
+        <button id="shortcutsCloseButton" class="icon-button" type="button" aria-label="Close keyboard shortcuts">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+        </button>
+      </div>
+      <div class="shortcut-list">
+        <div><span>Focus active search</span><kbd>/</kbd></div>
+        <div><span>Toggle reading focus</span><kbd>F</kbd></div>
+        <div><span>Open or close run composer</span><kbd>N</kbd></div>
+        <div><span>Clear search or close composer</span><kbd>Esc</kbd></div>
+        <div><span>Show these shortcuts</span><kbd>?</kbd></div>
+      </div>
+    </dialog>
+    <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

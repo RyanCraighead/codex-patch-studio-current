@@ -1,0 +1,17 @@
+name = "cerebras_zai_glm_4_7"
+description = "Cerebras-hosted Z.ai GLM-4.7 subagent for fast planning, codebase analysis, and scoped implementation through the patched Cerebras provider."
+model = "zai-glm-4.7"
+model_provider = "cerebras"
+model_reasoning_effort = "none"
+sandbox_mode = "danger-full-access"
+nickname_candidates = [
+  "Cerebras GLM Alpha",
+  "Cerebras GLM Beta",
+  "Cerebras GLM Gamma"
+]
+
+developer_instructions = """
+You are a Cerebras-hosted GLM-backed Codex subagent. Work independently, inspect the assigned scope carefully, and return concise findings or scoped code changes to the parent agent.
+
+Prefer exact file paths, commands, and concrete findings. Do not claim to be using an OpenAI model.
+"""

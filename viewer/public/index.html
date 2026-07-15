@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Chat Transfer Console</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar__header">
+          <div>
+            <h1>Chat Transfer Console</h1>
+            <p id="exportSummary">Loading exports</p>
+          </div>
+          <div class="header-actions">
+            <button id="exportAllButton" class="icon-button" type="button" title="Scan chat sources" aria-label="Scan chat sources">Scan</button>
+            <button id="refreshButton" class="icon-button" type="button" title="Refresh exports" aria-label="Refresh exports">Refresh</button>
+          </div>
+        </div>
+
+        <select id="exportSelect" class="select select--hidden" aria-label="Project"></select>
+        <div class="source-tabs" role="group" aria-label="Chat source filters">
+          <button class="source-filter-button is-active" data-source="all" type="button">All</button>
+          <button class="source-filter-button" data-source="augment" type="button">Augment</button>
+          <button class="source-filter-button" data-source="cline" type="button">Cline</button>
+          <button class="source-filter-button" data-source="roo-code" type="button">Roo</button>
+          <button class="source-filter-button" data-source="kiro" type="button">Kiro</button>
+          <button class="source-filter-button" data-source="codex" type="button">Codex</button>
+        </div>
+
+        <div class="section-title">
+          <span>Projects</span>
+          <span id="projectCountBadge" class="count-badge">0</span>
+        </div>
+        <div id="projectList" class="project-list" aria-label="Projects"></div>
+
+        <div id="jobStatus" class="job-status">No import job queued.</div>
+      </aside>
+
+      <section class="thread-pane">
+        <div class="thread-pane__header">
+          <div class="search-wrap">
+            <span class="search-icon" aria-hidden="true"></span>
+            <input id="searchInput" class="input" type="search" placeholder="Search chats">
+          </div>
+          <div class="thread-tools">
+            <button id="selectShownButton" class="secondary-button" type="button">Select shown</button>
+            <button id="clearSelectionButton" class="secondary-button" type="button">Clear</button>
+          </div>
+        </div>
+
+        <div class="filters" role="group" aria-label="Conversation filters">
+          <button class="filter-button is-active" data-filter="all" type="button">All</button>
+          <button class="filter-button" data-filter="unimported" type="button">New</button>
+          <button class="filter-button" data-filter="imported" type="button">Imported</button>
+          <button class="filter-button" data-filter="pinned" type="button">Pinned</button>
+          <button class="filter-button" data-filter="forked" type="button">Forks</button>
+        </div>
+
+        <div class="thread-table-head" aria-hidden="true">
+          <span></span>
+          <span>Title</span>
+          <span>Date</span>
+          <span>Tools</span>
+          <span>Diffs</span>
+          <span>Status</span>
+        </div>
+
+        <div id="conversationList" class="conversation-list" aria-label="Conversations"></div>
+
+        <div class="import-toolbar" aria-label="Import controls">
+          <button id="importSelectedButton" class="primary-button" type="button" disabled>Import selected</button>
+          <button id="importAllButton" class="primary-button" type="button">Import all</button>
+          <button id="importProjectButton" class="secondary-button" type="button" disabled>Import current project</button>
+        </div>
+      </section>
+
+      <section class="content">
+        <header class="content-header">
+          <div>
+            <div id="conversationKicker" class="kicker">No conversation selected</div>
+            <h2 id="conversationTitle">Select a conversation</h2>
+            <div id="conversationMeta" class="meta-row"></div>
+          </div>
+          <div class="content-actions">
+            <button id="importCurrentButton" class="primary-button" type="button" disabled>Import thread</button>
+            <button id="rawToggleButton" class="secondary-button" type="button" disabled>Raw</button>
+            <button id="copyIdButton" class="secondary-button" type="button" disabled>Copy ID</button>
+          </div>
+        </header>
+
+        <div id="conversationBody" class="conversation-body">
+          <div class="empty-state">
+            Pick a thread on the left. The viewer uses normalized exports from supported chat sources and keeps tool/action cards with the messages.
+          </div>
+        </div>
+
+        <section class="codex-move-panel" aria-label="Codex project mover">
+          <div class="panel-heading">
+            <span>Codex Project Mover</span>
+            <button id="reloadCodexProjectsButton" class="mini-button" type="button">Reload</button>
+          </div>
+          <div class="codex-move-grid">
+            <label>
+              <span>Existing Codex project</span>
+              <select id="codexProjectSelect" class="select select--flush"></select>
+            </label>
+            <label>
+              <span>New folder path</span>
+              <input id="codexMoveDestination" class="input input--flush" type="text" placeholder="D:\Projects\project-name">
+            </label>
+            <div class="codex-move-actions">
+              <button id="previewCodexMoveButton" class="secondary-button" type="button" disabled>Preview move</button>
+              <button id="scheduleCodexMoveButton" class="primary-button" type="button" disabled>Move project</button>
+            </div>
+          </div>
+          <div id="codexProjectStatus" class="codex-project-status">Loading Codex projects</div>
+          <div id="codexMoveStatus" class="codex-move-status">No project move queued.</div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

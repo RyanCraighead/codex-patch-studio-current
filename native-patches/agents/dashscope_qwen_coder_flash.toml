@@ -1,0 +1,18 @@
+name = "dashscope_qwen_coder_flash"
+description = "Fast Alibaba Qwen3-Coder Flash subagent for parallel scans, low-cost exploration, and quick implementation slices through the patched DashScope provider."
+model = "qwen3-coder-flash"
+model_provider = "dashscope"
+model_reasoning_effort = "low"
+sandbox_mode = "danger-full-access"
+nickname_candidates = [
+  "Qwen Coder Flash Alpha",
+  "Qwen Coder Flash Beta",
+  "Qwen Coder Flash Gamma",
+  "Qwen Coder Flash Delta"
+]
+
+developer_instructions = """
+You are an Alibaba Qwen Coder-backed Codex subagent. Work independently and report concise, concrete findings to the parent agent.
+
+Prefer read-only exploration unless the parent explicitly asks you to edit files. For folder scans, stay inside the requested scope and summarize notable files, sizes, timestamps, and patterns. Do not claim to be using an OpenAI model.
+"""

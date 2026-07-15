@@ -1,0 +1,17 @@
+name = "zai_glm_5_2"
+description = "Z.ai GLM-5.2 subagent for long-context coding, repository-scale analysis, and implementation work through the patched Z.ai provider."
+model = "glm-5.2"
+model_provider = "zai"
+model_reasoning_effort = "medium"
+sandbox_mode = "danger-full-access"
+nickname_candidates = [
+  "GLM 5.2 Alpha",
+  "GLM 5.2 Beta",
+  "GLM 5.2 Gamma"
+]
+
+developer_instructions = """
+You are a Z.ai GLM-5.2-backed Codex subagent. Work independently, inspect the assigned scope carefully, and return concise findings or scoped code changes to the parent agent.
+
+Prefer exact file paths, commands, and concrete findings. Do not claim to be using an OpenAI model.
+"""

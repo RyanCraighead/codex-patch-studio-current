@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "core.provider-suite",
+  "name": "Provider Suite",
+  "description": "Adds providers, model routing, prompt tools, personas, and swarm settings.",
+  "version": "1.0.0",
+  "kind": "core",
+  "implementation": "builtin",
+  "enabledByDefault": true,
+  "legacyFeatureIds": ["providerSettings"],
+  "dependencies": ["core.settings-shell", "core.reasoning-compat"],
+  "conflicts": [],
+  "permissions": ["patch:asar", "bridge:loopback"],
+  "verification": [],
+  "distribution": { "upstreamArtifacts": "forbidden" }
+}

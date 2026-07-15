@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "core.eager-history",
+  "name": "Legacy Eager History Hydration",
+  "description": "Optionally patches the renderer to eagerly hydrate a large recent-task window. Disabled by default because it can cause severe lag with large catalogs.",
+  "version": "1.0.0",
+  "kind": "core",
+  "implementation": "builtin",
+  "enabledByDefault": false,
+  "legacyFeatureIds": ["chatLimit"],
+  "dependencies": [],
+  "conflicts": ["core.history"],
+  "permissions": ["patch:asar"],
+  "verification": [],
+  "distribution": { "upstreamArtifacts": "forbidden" }
+}

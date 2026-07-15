@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "core.imports",
+  "name": "Chat Imports",
+  "description": "Adds native import and repair controls for supported chat sources.",
+  "version": "1.0.0",
+  "kind": "core",
+  "implementation": "builtin",
+  "enabledByDefault": true,
+  "legacyFeatureIds": ["importSettings"],
+  "dependencies": ["core.settings-shell"],
+  "conflicts": [],
+  "permissions": ["patch:asar", "bridge:loopback"],
+  "verification": [],
+  "distribution": { "upstreamArtifacts": "forbidden" }
+}

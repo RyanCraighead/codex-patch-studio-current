@@ -1,0 +1,31 @@
+{
+  "name": "codex-patch-studio-current",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Version-aware native Codex desktop patcher that tracks the current installed Windows build.",
+  "scripts": {
+    "dev": "node viewer/server.cjs 4577",
+    "dev:alt": "node viewer/server.cjs 4580",
+    "dev:codex": "node --no-warnings codex-viewer/server.cjs 4590",
+    "setup": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/setup-current-patcher.ps1",
+    "update:current": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/ensure-current-codex-patch.ps1 -Force",
+    "check:current": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/ensure-current-codex-patch.ps1 -CheckOnly",
+    "patch:codex": "node scripts/build-patched-codex-app.cjs",
+    "features:list": "node scripts/feature-registry.cjs list",
+    "features:validate": "node scripts/feature-registry.cjs validate --json",
+    "features:scaffold": "node scripts/feature-registry.cjs scaffold",
+    "check:source-only": "node scripts/check-source-only.cjs",
+    "bundle:codex": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-patched-codex-single-exe.ps1",
+    "shortcut:codex": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/create-patched-codex-shortcut.ps1",
+    "launch:codex": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/launch-patched-codex.ps1 -StopPatchedOnly",
+    "test": "node --test tests/*.test.cjs",
+    "test:live": "node scripts/verify-current-patched-build.cjs",
+    "test:runtime": "node scripts/verify-runtime-services.cjs",
+    "test:ui": "node scripts/verify-current-ui.cjs",
+    "test:portable-payload": "node scripts/verify-portable-payload.cjs"
+  },
+  "dependencies": {
+    "classic-level": "3.0.0",
+    "ws": "8.21.0"
+  }
+}

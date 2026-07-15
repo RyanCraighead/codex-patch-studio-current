@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Patcher Local Feature"
+  short_description: "Create private local patch modules without publishing them."
+  default_prompt: "Create or update a private local Codex Patch Studio feature module, validate it, Git-track it locally, and do not publish it unless I explicitly ask."

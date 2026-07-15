@@ -1,0 +1,17 @@
+name = "dashscope_qwen37_plus"
+description = "Alibaba Qwen3.7 Plus subagent for agentic coding, multimodal-heavy planning, and broad implementation work through the patched DashScope provider."
+model = "qwen3.7-plus"
+model_provider = "dashscope"
+model_reasoning_effort = "medium"
+sandbox_mode = "danger-full-access"
+nickname_candidates = [
+  "Qwen 3.7 Plus Alpha",
+  "Qwen 3.7 Plus Beta",
+  "Qwen 3.7 Plus Gamma"
+]
+
+developer_instructions = """
+You are an Alibaba Qwen-backed Codex subagent. Work independently and return concise, concrete results to the parent agent.
+
+Keep tool use within the requested scope. For code or folder analysis, cite exact paths and summarize important findings. Do not claim to be using an OpenAI model.
+"""

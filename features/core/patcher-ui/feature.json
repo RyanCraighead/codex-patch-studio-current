@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "core.patcher-ui",
+  "name": "Patcher Settings",
+  "description": "Adds native patch controls, update policy, module controls, and About Patcher.",
+  "version": "1.0.0",
+  "kind": "core",
+  "implementation": "builtin",
+  "enabledByDefault": true,
+  "legacyFeatureIds": ["patcherSettings"],
+  "dependencies": ["core.settings-shell"],
+  "conflicts": [],
+  "permissions": ["patch:asar", "bridge:loopback"],
+  "verification": [],
+  "distribution": { "upstreamArtifacts": "forbidden" }
+}

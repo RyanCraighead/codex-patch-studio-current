@@ -1,0 +1,50 @@
+# Update Lifecycle
+
+## Normal Launch
+
+1. The desktop shortcut starts `scripts/launch-patched-codex.ps1` in a hidden PowerShell process.
+2. The configured policy determines whether detection is Off, Notify, or Auto rebuild.
+3. `ensure-current-codex-patch.ps1` performs one installed-package check when policy permits it.
+4. It compares installed version, package identity, `app.asar` fingerprint, generated executable, and patcher source fingerprint with `codex-launcher.local.json`.
+5. When everything matches, it initializes the patched home, starts local bridges, and opens the clone.
+
+## Installed Codex Changed
+
+1. A named cross-process mutex prevents overlapping builds.
+2. The updater records whether the old configured clone is running but leaves it intact during the build.
+3. It copies the installed application into a new immutable, versioned candidate clone.
+4. It extracts the source ASAR and applies current structural adapters.
+5. JavaScript syntax checks run after each edited asset.
+6. The ASAR is repacked, extracted again, and checked for all required features.
+7. Only after packed verification succeeds does the launcher config switch to the candidate.
+8. If the previous patched clone was running, only its processes are stopped and the verified candidate is relaunched.
+
+## Failure Behavior
+
+The updater fails closed when:
+
+- The installed package cannot be discovered.
+- The current version is older than the successor's supported floor.
+- A required structural anchor is missing or ambiguous.
+- Patched JavaScript fails syntax validation.
+- Packed verification does not find every enabled feature.
+- Another build owns the patch mutex.
+
+The signed Store package and previous verified clone are read-only throughout this process. A failed patch does not modify stock Codex, the previous clone, or the canonical chat archive.
+
+## Adding A Validated Build
+
+After an updated build passes unit, packed, runtime, UI, and renderer diagnostics, add its version and hashes to `config/compatibility.json`. This records a known validation result but does not change current-version discovery.
+
+Recommended commands:
+
+```powershell
+npm run update:current
+npm test
+npm run test:live
+$env:CODEX_PATCHED_REMOTE_DEBUGGING_PORT = "9229"
+npm run launch:codex
+npm run test:runtime
+npm run test:ui
+node scripts\collect-renderer-diagnostics.cjs 9229
+```
