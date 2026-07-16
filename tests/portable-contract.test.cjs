@@ -93,6 +93,7 @@ test("portable payload uses long-path-safe verified extraction", () => {
   assert.match(innerCompression, /payload-compression-\{0\}\.log/);
   assert.match(innerCompression, /if \(-not \$compressionSucceeded\)/);
   assert.match(packager, /extractorSha256/);
+  assert.match(packager, /patchedAppAsarSha256/);
   assert.match(packager, /Bundled payload extraction failed/);
   assert.doesNotMatch(packager, /Compress-Archive/);
   assert.doesNotMatch(packager, /Expand-Archive/);
@@ -100,6 +101,7 @@ test("portable payload uses long-path-safe verified extraction", () => {
   assert.doesNotMatch(packager, /sourceAppDir\s*=\s*\$sourceAppDir/);
   assert.match(read("scripts/verify-portable-payload.cjs"), /verificationMode/);
   assert.match(read("scripts/verify-portable-payload.cjs"), /bundled-self-extracting/);
+  assert.match(read("scripts/verify-portable-payload.cjs"), /patchedAppAsarSha256/);
   assert.match(read("scripts/verify-runtime-services.cjs"), /CODEX_PATCHED_LAUNCHER_CONFIG/);
 });
 
@@ -129,6 +131,7 @@ test("portable bootstrap serializes extraction and self-heals incomplete runtime
   assert.match(bootstrap, /\$runtimePayloadPresent/);
   assert.match(bootstrap, /app\\resources\\app\.asar/);
   assert.match(bootstrap, /scripts\\launch-patched-codex\.ps1/);
+  assert.match(bootstrap, /patchedAppAsarSha256 = \[string\]\$manifest\.patchedAppAsarSha256/);
   assert.match(
     bootstrap,
     /if \(\(Test-Path -LiteralPath \$markerPath\) -and \$runtimePayloadPresent\)/,
@@ -151,13 +154,28 @@ test("update detection fingerprints the runtime verification contract", () => {
   for (const dependency of [
     "codex-update-policy.psm1",
     "ensure-current-codex-patch.ps1",
+    "package-patched-codex-single-exe.ps1",
+    "verify-portable-payload.cjs",
     "verify-current-patched-build.cjs",
     "verify-runtime-services.cjs",
     "verify-current-ui.cjs",
     "resolve-listening-process.cjs",
+    "bootstrap-launcher.cs",
+    "7z-sfx-as-invoker.sfx",
   ]) {
     assert.match(fingerprint, new RegExp(dependency.replaceAll(".", "\\.")));
   }
+});
+
+test("live verifier validates installed clones and bundled snapshots by their own contracts", () => {
+  const verifier = read("scripts/verify-current-patched-build.cjs");
+
+  assert.match(verifier, /CODEX_PATCHED_LAUNCHER_CONFIG/);
+  assert.match(verifier, /bundled-self-extracting/);
+  assert.match(verifier, /bundled-snapshot/);
+  assert.match(verifier, /patchedAppAsarSha256/);
+  assert.match(verifier, /Portable patched app\.asar hash does not match the bundle manifest/);
+  assert.match(verifier, /required: !bundledSnapshot/);
 });
 
 test("packager verifies the dormant payload before compression and fails closed", () => {

@@ -31,7 +31,7 @@ function sha256(filePath) {
   return hash.digest("hex");
 }
 
-function installedVersion() {
+function installedVersion({ required = true } = {}) {
   const result = spawnSync(
     "powershell.exe",
     [
@@ -41,29 +41,56 @@ function installedVersion() {
     ],
     { encoding: "utf8", windowsHide: true }
   );
-  if (result.status !== 0) fail(result.stderr || "Could not detect installed Codex version.");
-  return String(result.stdout || "").trim();
+  const version = String(result.stdout || "").trim();
+  if (result.status !== 0 || !version) {
+    if (required) fail(result.stderr || "Could not detect installed Codex version.");
+    return null;
+  }
+  return version;
 }
 
-const launcherPath = path.join(root, "codex-launcher.local.json");
+const launcherPath = path.resolve(
+  process.env.CODEX_PATCHED_LAUNCHER_CONFIG || path.join(root, "codex-launcher.local.json"),
+);
 if (!fs.existsSync(launcherPath)) fail(`Missing launcher config: ${launcherPath}`);
 const launcher = readJson(launcherPath);
 const manifestPath = path.join(launcher.cloneRoot, "patch-manifest.json");
 if (!fs.existsSync(manifestPath)) fail(`Missing patch manifest: ${manifestPath}`);
 const manifest = readJson(manifestPath);
 
-const installed = installedVersion();
-if (launcher.sourceVersion !== installed) {
+const bundledSnapshot =
+  launcher.mode === "bundled-self-extracting" || launcher.sourceMode === "bundled-snapshot";
+const installed = installedVersion({ required: !bundledSnapshot });
+if (!bundledSnapshot && launcher.sourceVersion !== installed) {
   fail(`Patched version ${launcher.sourceVersion} does not match installed Codex ${installed}.`);
 }
-for (const filePath of [launcher.codexExe, launcher.appAsar, launcher.originalAppAsarBackup]) {
+for (const filePath of [launcher.codexExe, launcher.appAsar]) {
   if (!filePath || !fs.existsSync(filePath)) fail(`Missing patched build file: ${filePath}`);
 }
-if (sha256(launcher.sourceAsarPath) !== launcher.sourceAsarSha256) {
-  fail("Installed source app.asar no longer matches the build manifest.");
+if (sha256(launcher.codexExe) !== String(launcher.sourceDesktopExeSha256 || "").toLowerCase()) {
+  fail("Patched desktop executable hash does not match the build manifest.");
 }
-if (sha256(launcher.appAsar) === sha256(launcher.originalAppAsarBackup)) {
-  fail("Patched app.asar is byte-identical to its original backup.");
+if (bundledSnapshot) {
+  const expectedPatchedAsarHash = String(launcher.patchedAppAsarSha256 || "").toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(expectedPatchedAsarHash)) {
+    fail("Portable launcher is missing patchedAppAsarSha256.");
+  }
+  if (sha256(launcher.appAsar) !== expectedPatchedAsarHash) {
+    fail("Portable patched app.asar hash does not match the bundle manifest.");
+  }
+  if (String(manifest.patchedAppAsarSha256 || "").toLowerCase() !== expectedPatchedAsarHash) {
+    fail("Portable patch manifest changed the patched app.asar hash.");
+  }
+} else {
+  if (!launcher.originalAppAsarBackup || !fs.existsSync(launcher.originalAppAsarBackup)) {
+    fail(`Missing patched build file: ${launcher.originalAppAsarBackup}`);
+  }
+  if (!launcher.sourceAsarPath || sha256(launcher.sourceAsarPath) !== launcher.sourceAsarSha256) {
+    fail("Installed source app.asar no longer matches the build manifest.");
+  }
+  if (sha256(launcher.appAsar) === sha256(launcher.originalAppAsarBackup)) {
+    fail("Patched app.asar is byte-identical to its original backup.");
+  }
 }
 
 const requiredVerification = [
@@ -108,6 +135,7 @@ process.stdout.write(
     {
       ok: true,
       installedVersion: installed,
+      bundledSnapshot,
       sourceMode: launcher.sourceMode,
       sourceHashMatched: true,
       cloneRoot: launcher.cloneRoot,

@@ -435,6 +435,11 @@ $fingerprintNode = @(
 if (-not $fingerprintNode) {
   throw "Node.js was not found for computing the packaged patcher fingerprint."
 }
+$patchedAppAsarPath = Join-Path $payloadRoot "app\resources\app.asar"
+if (-not (Test-Path -LiteralPath $patchedAppAsarPath -PathType Leaf)) {
+  throw "Staged patched app.asar is missing: $patchedAppAsarPath"
+}
+$patchedAppAsarSha256 = Get-Sha256Hex -Path $patchedAppAsarPath
 $patcherSource = & $fingerprintNode (Join-Path $payloadRoot "scripts\patcher-fingerprint.cjs") | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or -not $patcherSource.sha256) {
   throw "Could not compute the packaged patcher source fingerprint."
@@ -449,6 +454,7 @@ $sourceManifest = [ordered]@{
   sourceVersion = $version
   sourceDesktopExecutableName = Split-Path -Leaf $sourceCodexExe
   sourceAsarSha256 = [string]$config.sourceAsarSha256
+  patchedAppAsarSha256 = $patchedAppAsarSha256
   sourceDesktopExeSha256 = [string]$config.sourceDesktopExeSha256
   sourceAppServerCliSha256 = [string]$config.sourceAppServerCliSha256
   patcherSource = $patcherSource
@@ -555,6 +561,7 @@ $manifest = [ordered]@{
   sourceVersion = $sourceManifest.sourceVersion
   sourceDesktopExecutableName = $sourceManifest.sourceDesktopExecutableName
   sourceAsarSha256 = $sourceManifest.sourceAsarSha256
+  patchedAppAsarSha256 = $sourceManifest.patchedAppAsarSha256
   sourceDesktopExeSha256 = $sourceManifest.sourceDesktopExeSha256
   sourceAppServerCliSha256 = $sourceManifest.sourceAppServerCliSha256
   patcherSource = $sourceManifest.patcherSource
@@ -817,6 +824,7 @@ try {
     sourceVersion = [string]$manifest.sourceVersion
     sourceDesktopExecutableName = $desktopExecutableName
     sourceAsarSha256 = [string]$manifest.sourceAsarSha256
+    patchedAppAsarSha256 = [string]$manifest.patchedAppAsarSha256
     sourceDesktopExeSha256 = [string]$manifest.sourceDesktopExeSha256
     sourceAppServerCliSha256 = [string]$manifest.sourceAppServerCliSha256
     patcherSource = $manifest.patcherSource

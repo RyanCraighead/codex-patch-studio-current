@@ -2,6 +2,7 @@
 
 "use strict";
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
@@ -20,6 +21,22 @@ function required(relativePath) {
   const filePath = path.join(payloadRoot, relativePath);
   if (!fs.existsSync(filePath)) throw new Error(`Portable payload is missing ${relativePath}`);
   return filePath;
+}
+
+function sha256(filePath) {
+  const hash = crypto.createHash("sha256");
+  const handle = fs.openSync(filePath, "r");
+  const buffer = Buffer.allocUnsafe(4 * 1024 * 1024);
+  try {
+    while (true) {
+      const count = fs.readSync(handle, buffer, 0, buffer.length, null);
+      if (!count) break;
+      hash.update(buffer.subarray(0, count));
+    }
+  } finally {
+    fs.closeSync(handle);
+  }
+  return hash.digest("hex");
 }
 
 function filesUnder(root) {
@@ -57,7 +74,7 @@ function scanFileForSecrets(filePath, secrets) {
 }
 
 const desktopExecutable = required(path.join("app", "ChatGPT.exe"));
-required(path.join("app", "resources", "app.asar"));
+const appAsar = required(path.join("app", "resources", "app.asar"));
 const nodeExecutable = required(path.join("app", "resources", "cua_node", "bin", "node.exe"));
 const sqliteExecutable = required(path.join("tools", "sqlite3.exe"));
 required(path.join("node_modules", "classic-level", "package.json"));
@@ -82,6 +99,13 @@ const sourceManifestText = fs.readFileSync(sourceManifestPath, "utf8").replace(/
 const sourceManifest = JSON.parse(sourceManifestText);
 if (typeof sourceManifest.portableElectronProfile !== "boolean") {
   throw new Error("Portable source manifest portableElectronProfile must be true or false");
+}
+if (!/^[a-f0-9]{64}$/i.test(String(sourceManifest.patchedAppAsarSha256 || ""))) {
+  throw new Error("Portable source manifest is missing patchedAppAsarSha256");
+}
+const patchedAppAsarSha256 = sha256(appAsar);
+if (patchedAppAsarSha256.toLowerCase() !== sourceManifest.patchedAppAsarSha256.toLowerCase()) {
+  throw new Error("Portable patched app.asar hash does not match the source manifest");
 }
 for (const forbiddenField of ["sourceAppDir", "sourceConfigPath"]) {
   if (Object.hasOwn(sourceManifest, forbiddenField)) {
@@ -126,6 +150,9 @@ if (runtimeMode) {
   }
   if (runtimeLauncher.portableElectronProfile !== sourceManifest.portableElectronProfile) {
     throw new Error("Initialized portable runtime launcher changed the packaged Electron profile mode.");
+  }
+  if (runtimeLauncher.patchedAppAsarSha256 !== sourceManifest.patchedAppAsarSha256) {
+    throw new Error("Initialized portable runtime launcher changed the patched app.asar hash.");
   }
   const electronUserDataPath = path.resolve(String(runtimeLauncher.electronUserDataPath || ""));
   const expectedElectronUserDataPath = sourceManifest.portableElectronProfile
@@ -186,6 +213,7 @@ process.stdout.write(`${JSON.stringify({
   payloadFileCount: payloadFiles.length,
   bundledNodeVersion: nodeCheck.stdout.trim(),
   bundledSqliteVersion: sqliteCheck.stdout.trim().split(/\s+/)[0],
+  patchedAppAsarSha256,
   scannedProviderSecretCount: secrets.length,
   privateRuntimeFilesPresent: false,
   generatedLauncherConfigPresent: fs.existsSync(runtimeLauncherPath),
