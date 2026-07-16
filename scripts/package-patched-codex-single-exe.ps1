@@ -328,6 +328,7 @@ $runtimeScripts = @(
   "run-tests.cjs",
   "check-source-only.cjs",
   "patcher-fingerprint.cjs",
+  "packed-verification-contract.cjs",
   "verify-portable-payload.cjs",
   "verify-current-patched-build.cjs",
   "verify-runtime-services.cjs",
@@ -384,6 +385,22 @@ $payloadToolsDir = Join-Path $payloadRoot "tools"
 New-Item -ItemType Directory -Force -Path $payloadToolsDir | Out-Null
 $sqliteTool = Find-SqliteTool
 Copy-Item -LiteralPath $sqliteTool -Destination (Join-Path $payloadToolsDir "sqlite3.exe") -Force
+$sevenZipSfx = Find-SevenZipSfx
+Copy-Item `
+  -LiteralPath $sevenZipSfx `
+  -Destination (Join-Path $payloadToolsDir "7z-sfx-as-invoker.sfx") `
+  -Force
+
+$payloadPortableAssetsDir = Join-Path $payloadRoot "assets\portable"
+New-Item -ItemType Directory -Force -Path $payloadPortableAssetsDir | Out-Null
+$bootstrapLauncherSource = Join-Path $RepoRoot "assets\portable\bootstrap-launcher.cs"
+if (-not (Test-Path -LiteralPath $bootstrapLauncherSource -PathType Leaf)) {
+  throw "Portable bootstrap launcher source missing: $bootstrapLauncherSource"
+}
+Copy-Item `
+  -LiteralPath $bootstrapLauncherSource `
+  -Destination (Join-Path $payloadPortableAssetsDir "bootstrap-launcher.cs") `
+  -Force
 
 $payloadConfigDir = Join-Path $payloadRoot "config"
 New-Item -ItemType Directory -Force -Path $payloadConfigDir | Out-Null
@@ -461,6 +478,7 @@ $sourceManifest = [ordered]@{
   limit = if ($config.limit) { [int]$config.limit } else { 1000 }
   features = $config.features
   featureModules = $config.featureModules
+  packedVerification = $config.packedVerification
   catalogShim = $config.catalogShim
   shareChatDatabaseWithStock = $shareChatDatabaseWithStock
   portableElectronProfile = $portableElectronProfileEnabled
@@ -491,7 +509,6 @@ if (
 
 Write-Host "Compressing payload with long-path-safe 7-Zip. This can take a few minutes."
 $sevenZip = Find-SevenZipTool
-$sevenZipSfx = Find-SevenZipSfx
 $bundledSevenZip = Join-Path $sfxRoot "7z.exe"
 Copy-Item -LiteralPath $sevenZip -Destination $bundledSevenZip -Force
 $compressionProfiles = @(
@@ -568,6 +585,7 @@ $manifest = [ordered]@{
   limit = $sourceManifest.limit
   features = $sourceManifest.features
   featureModules = $sourceManifest.featureModules
+  packedVerification = $sourceManifest.packedVerification
   catalogShim = $sourceManifest.catalogShim
   shareChatDatabaseWithStock = $sourceManifest.shareChatDatabaseWithStock
   portableElectronProfile = $sourceManifest.portableElectronProfile
@@ -812,6 +830,7 @@ try {
     limit = [int]$manifest.limit
     features = $manifest.features
     featureModules = $manifest.featureModules
+    packedVerification = $manifest.packedVerification
     builtAt = [string]$manifest.packagedAt
     bundleId = [string]$manifest.bundleId
     bundleName = [string]$manifest.bundleName

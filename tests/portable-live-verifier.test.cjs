@@ -5,28 +5,11 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { requiredPackedVerification } = require("../scripts/packed-verification-contract.cjs");
 
 const root = path.resolve(__dirname, "..");
 const verifier = path.join(root, "scripts", "verify-current-patched-build.cjs");
-const requiredVerification = [
-  "containsReasoningSummaryConversionPatch",
-  "containsNativeOrchestrator",
-  "containsProviderSettings",
-  "containsAutoRouterSettings",
-  "containsPromptToolsSettings",
-  "containsPersonasSettings",
-  "containsSwarmSettings",
-  "containsDefaultPromptCatalog",
-  "containsImportSettings",
-  "containsPatcherSettings",
-  "containsFeatureDevelopmentSettings",
-  "containsLocalConnectSources",
-  "containsProviderModelCatalogPatch",
-  "containsNativeSettingsSections",
-  "containsNativeNavigationBridge",
-  "containsPreloadOutboundInterceptor",
-  "containsRemoteControlMainProcessPatch",
-];
+const requiredVerification = requiredPackedVerification({ chatLimit: false });
 
 function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");

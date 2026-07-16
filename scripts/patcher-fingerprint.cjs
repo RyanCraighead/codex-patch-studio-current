@@ -26,6 +26,7 @@ const SOURCE_PATHS = [
   "scripts/start-codex-patch-manager.ps1",
   "scripts/start-codex-provider-proxies.ps1",
   "scripts/package-patched-codex-single-exe.ps1",
+  "scripts/packed-verification-contract.cjs",
   "scripts/verify-portable-payload.cjs",
   "scripts/verify-current-patched-build.cjs",
   "scripts/verify-runtime-services.cjs",

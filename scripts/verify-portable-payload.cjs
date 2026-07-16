@@ -6,6 +6,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { requiredPackedVerification } = require("./packed-verification-contract.cjs");
 
 const arguments_ = process.argv.slice(2);
 const runtimeMode = arguments_.includes("--runtime");
@@ -77,6 +78,8 @@ const desktopExecutable = required(path.join("app", "ChatGPT.exe"));
 const appAsar = required(path.join("app", "resources", "app.asar"));
 const nodeExecutable = required(path.join("app", "resources", "cua_node", "bin", "node.exe"));
 const sqliteExecutable = required(path.join("tools", "sqlite3.exe"));
+const installerSfx = required(path.join("tools", "7z-sfx-as-invoker.sfx"));
+required(path.join("assets", "portable", "bootstrap-launcher.cs"));
 required(path.join("node_modules", "classic-level", "package.json"));
 required(path.join("node_modules", "ws", "package.json"));
 required(path.join("scripts", "launch-patched-codex.ps1"));
@@ -94,6 +97,13 @@ required(path.join("scripts", "resolve-listening-process.cjs"));
 required(path.join("scripts", "export-augment-webview-state.cjs"));
 required(path.join("features", "core", "provider-suite", "payload", "codex-native-provider-settings.js"));
 
+const expectedInstallerSfxSha256 =
+  "e1e9aa1eb9fe7f331de76479154ac4bb9998c8919dbc79bebe4f6eaa795ce312";
+const installerSfxSha256 = sha256(installerSfx);
+if (fs.statSync(installerSfx).size !== 141824 || installerSfxSha256 !== expectedInstallerSfxSha256) {
+  throw new Error("Portable installer SFX module does not match the pinned verified build");
+}
+
 const sourceManifestPath = required("bundle-source.json");
 const sourceManifestText = fs.readFileSync(sourceManifestPath, "utf8").replace(/^\uFEFF/, "");
 const sourceManifest = JSON.parse(sourceManifestText);
@@ -106,6 +116,12 @@ if (!/^[a-f0-9]{64}$/i.test(String(sourceManifest.patchedAppAsarSha256 || ""))) 
 const patchedAppAsarSha256 = sha256(appAsar);
 if (patchedAppAsarSha256.toLowerCase() !== sourceManifest.patchedAppAsarSha256.toLowerCase()) {
   throw new Error("Portable patched app.asar hash does not match the source manifest");
+}
+const requiredVerification = requiredPackedVerification(sourceManifest.features);
+for (const key of requiredVerification) {
+  if (sourceManifest.packedVerification?.[key] !== true) {
+    throw new Error(`Portable source manifest is missing packed verification: ${key}`);
+  }
 }
 for (const forbiddenField of ["sourceAppDir", "sourceConfigPath"]) {
   if (Object.hasOwn(sourceManifest, forbiddenField)) {
@@ -153,6 +169,11 @@ if (runtimeMode) {
   }
   if (runtimeLauncher.patchedAppAsarSha256 !== sourceManifest.patchedAppAsarSha256) {
     throw new Error("Initialized portable runtime launcher changed the patched app.asar hash.");
+  }
+  for (const key of requiredVerification) {
+    if (runtimeLauncher.packedVerification?.[key] !== true) {
+      throw new Error(`Initialized portable runtime lost packed verification: ${key}`);
+    }
   }
   const electronUserDataPath = path.resolve(String(runtimeLauncher.electronUserDataPath || ""));
   const expectedElectronUserDataPath = sourceManifest.portableElectronProfile
@@ -213,11 +234,13 @@ process.stdout.write(`${JSON.stringify({
   payloadFileCount: payloadFiles.length,
   bundledNodeVersion: nodeCheck.stdout.trim(),
   bundledSqliteVersion: sqliteCheck.stdout.trim().split(/\s+/)[0],
+  installerSfxSha256,
   patchedAppAsarSha256,
   scannedProviderSecretCount: secrets.length,
   privateRuntimeFilesPresent: false,
   generatedLauncherConfigPresent: fs.existsSync(runtimeLauncherPath),
   verificationMode: runtimeMode ? "initialized-runtime" : "dormant-payload",
   portableElectronProfile: sourceManifest.portableElectronProfile,
+  portableBuildAssetsPresent: true,
   localSourcePathsPresent: /sourceAppDir|sourceConfigPath/.test(sourceManifestText),
 }, null, 2)}\n`);

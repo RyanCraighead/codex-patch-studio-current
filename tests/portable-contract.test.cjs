@@ -3,12 +3,24 @@ const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { requiredPackedVerification } = require("../scripts/packed-verification-contract.cjs");
 
 const root = path.resolve(__dirname, "..");
 
 function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), "utf8");
 }
+
+test("packed verification contract adds eager-history markers only when selected", () => {
+  const lazy = requiredPackedVerification({ chatLimit: false });
+  const eager = requiredPackedVerification({ chatLimit: true });
+
+  assert.equal(new Set(lazy).size, lazy.length);
+  assert.equal(lazy.includes("containsChatLimitPatch"), false);
+  assert.equal(lazy.includes("containsHistoryHydrationDiagnostic"), false);
+  assert.equal(eager.includes("containsChatLimitPatch"), true);
+  assert.equal(eager.includes("containsHistoryHydrationDiagnostic"), true);
+});
 
 test("portable package carries its runtime dependencies", () => {
   const packager = read("scripts/package-patched-codex-single-exe.ps1");
@@ -25,8 +37,18 @@ test("portable package carries its runtime dependencies", () => {
   assert.match(packager, /CODEX_PATCHED_NODE/);
   assert.match(packager, /node_modules/);
   assert.match(packager, /sqlite3\.exe/);
+  assert.match(packager, /Join-Path \$payloadRoot "assets\\portable"/);
+  assert.match(
+    packager,
+    /Join-Path \$payloadToolsDir "7z-sfx-as-invoker\.sfx"/,
+  );
+  assert.match(
+    packager,
+    /Join-Path \$payloadPortableAssetsDir "bootstrap-launcher\.cs"/,
+  );
   assert.match(packager, /export-augment-webview-state\.cjs/);
   assert.match(packager, /"feature-registry\.cjs"/);
+  assert.match(packager, /"packed-verification-contract\.cjs"/);
   assert.match(packager, /"feature-development-workflow\.cjs"/);
   assert.match(packager, /"check-source-only\.cjs"/);
   assert.match(packager, /"atomic-json\.cjs"/);
@@ -44,6 +66,7 @@ test("portable package carries its runtime dependencies", () => {
     "atomic-json.cjs",
     "build-lock.cjs",
     "feature-development-workflow.cjs",
+    "packed-verification-contract.cjs",
     "run-tests.cjs",
     "check-source-only.cjs",
     "verify-portable-payload.cjs",
@@ -51,6 +74,8 @@ test("portable package carries its runtime dependencies", () => {
     "verify-runtime-services.cjs",
     "verify-current-ui.cjs",
     "resolve-listening-process.cjs",
+    "bootstrap-launcher.cs",
+    "7z-sfx-as-invoker.sfx",
   ]) {
     assert.match(payloadVerifier, new RegExp(dependency.replaceAll(".", "\\.")));
   }
@@ -71,6 +96,10 @@ test("portable package pins the verified installer SFX module", () => {
 
   assert.equal(sfx.length, 141824);
   assert.equal(hash, "E1E9AA1EB9FE7F331DE76479154AC4BB9998C8919DBC79BEBE4F6EAA795CE312");
+
+  const verifier = read("scripts/verify-portable-payload.cjs");
+  assert.match(verifier, /Portable installer SFX module does not match the pinned verified build/);
+  assert.match(verifier, /portableBuildAssetsPresent: true/);
 });
 
 test("portable payload uses long-path-safe verified extraction", () => {
@@ -94,6 +123,9 @@ test("portable payload uses long-path-safe verified extraction", () => {
   assert.match(innerCompression, /if \(-not \$compressionSucceeded\)/);
   assert.match(packager, /extractorSha256/);
   assert.match(packager, /patchedAppAsarSha256/);
+  assert.match(packager, /packedVerification = \$config\.packedVerification/);
+  assert.match(packager, /packedVerification = \$sourceManifest\.packedVerification/);
+  assert.match(packager, /packedVerification = \$manifest\.packedVerification/);
   assert.match(packager, /Bundled payload extraction failed/);
   assert.doesNotMatch(packager, /Compress-Archive/);
   assert.doesNotMatch(packager, /Expand-Archive/);
@@ -155,6 +187,7 @@ test("update detection fingerprints the runtime verification contract", () => {
     "codex-update-policy.psm1",
     "ensure-current-codex-patch.ps1",
     "package-patched-codex-single-exe.ps1",
+    "packed-verification-contract.cjs",
     "verify-portable-payload.cjs",
     "verify-current-patched-build.cjs",
     "verify-runtime-services.cjs",

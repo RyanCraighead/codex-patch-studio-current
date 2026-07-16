@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { requiredPackedVerification } = require("./packed-verification-contract.cjs");
 
 const root = path.resolve(__dirname, "..");
 
@@ -93,29 +94,7 @@ if (bundledSnapshot) {
   }
 }
 
-const requiredVerification = [
-  "containsReasoningSummaryConversionPatch",
-  "containsNativeOrchestrator",
-  "containsProviderSettings",
-  "containsAutoRouterSettings",
-  "containsPromptToolsSettings",
-  "containsPersonasSettings",
-  "containsSwarmSettings",
-  "containsDefaultPromptCatalog",
-  "containsImportSettings",
-  "containsPatcherSettings",
-  "containsFeatureDevelopmentSettings",
-  "containsLocalConnectSources",
-  "containsProviderModelCatalogPatch",
-  "containsNativeSettingsSections",
-  "containsNativeNavigationBridge",
-  "containsPreloadOutboundInterceptor",
-  "containsRemoteControlMainProcessPatch",
-];
-if (launcher.features?.chatLimit === true) {
-  requiredVerification.unshift("containsHistoryHydrationDiagnostic");
-  requiredVerification.unshift("containsChatLimitPatch");
-}
+const requiredVerification = requiredPackedVerification(launcher.features);
 for (const key of requiredVerification) {
   if (manifest.packedVerification?.[key] !== true) fail(`Packed verification failed: ${key}`);
 }
