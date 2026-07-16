@@ -22,9 +22,49 @@ const allowedBuildToolBinaries = new Map([
 ]);
 const secretPatterns = [
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
+  /\b(?:csk-|ghp_|github_pat_|sk-ant-)[A-Za-z0-9_-]{20,}\b/gi,
   /\b(?:DEEPSEEK|DASHSCOPE|ZAI|OPENAI|ANTHROPIC)_API_KEY\s*[=:]\s*["']?[^\s"']{12,}/gi,
+  /\b[A-Z][A-Z0-9_]*(?:API_KEY|TOKEN|SECRET)\b\s*[=:]\s*["'](?!your-|replace-|example-|<)[A-Za-z0-9._-]{20,}["']/gi,
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g,
 ];
+
+const oneLineString = String.raw`(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|\`(?:\\.|[^\`\\\r\n])*\`)`;
+
+function literalBody(literal) {
+  return literal.slice(1, -1);
+}
+
+function suspiciousAnchorBody(body) {
+  return body.length >= 300;
+}
+
+function findEmbeddedUpstreamAnchors(text) {
+  const assignments = new Map();
+  const assignmentPattern = new RegExp(
+    String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(${oneLineString})\s*;`,
+    "g"
+  );
+  for (const match of text.matchAll(assignmentPattern)) {
+    assignments.set(match[1], literalBody(match[2]));
+  }
+
+  const findings = [];
+  const directPattern = new RegExp(
+    String.raw`replaceExactly\(\s*[^,\r\n]+,\s*(${oneLineString})\s*,`,
+    "g"
+  );
+  for (const match of text.matchAll(directPattern)) {
+    const body = literalBody(match[1]);
+    if (suspiciousAnchorBody(body)) findings.push({ offset: match.index, length: body.length });
+  }
+  for (const [name, body] of assignments) {
+    if (!suspiciousAnchorBody(body)) continue;
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const usePattern = new RegExp(String.raw`replaceExactly\(\s*[^,\r\n]+,\s*${escapedName}\s*,`);
+    if (usePattern.test(text)) findings.push({ variable: name, length: body.length });
+  }
+  return findings;
+}
 
 function candidateFiles() {
   const result = spawnSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
@@ -68,17 +108,18 @@ function scan() {
       if (pattern.test(text)) violations.push({ file: relativePath, reason: "credential or private-key pattern" });
     }
     if (/C:\\Users\\Ryan(?:\\|\b)/i.test(text)) violations.push({ file: relativePath, reason: "user-specific absolute path" });
-    if (
-      /\b(?:const|let|var)\s+\w*(?:Before|Original)\w*\s*=\s*[`"'][^\n]{600,}/.test(text) ||
-      /\b(?:const|let|var)\s+\w*(?:Before|Original)\w*\s*=\s*[`"'][^\n]{120,}function\s/.test(text)
-    ) {
+    if (findEmbeddedUpstreamAnchors(text).length) {
       violations.push({ file: relativePath, reason: "large embedded upstream-source anchor; use structural matching" });
     }
   }
   return violations;
 }
 
-const violations = scan();
-const result = { ok: violations.length === 0, scannedRoot: rootDir, violations };
-process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-if (violations.length) process.exitCode = 1;
+if (require.main === module) {
+  const violations = scan();
+  const result = { ok: violations.length === 0, scannedRoot: rootDir, violations };
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  if (violations.length) process.exitCode = 1;
+}
+
+module.exports = { findEmbeddedUpstreamAnchors, scan };

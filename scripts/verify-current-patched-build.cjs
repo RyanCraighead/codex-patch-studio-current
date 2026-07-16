@@ -77,6 +77,7 @@ const requiredVerification = [
   "containsDefaultPromptCatalog",
   "containsImportSettings",
   "containsPatcherSettings",
+  "containsFeatureDevelopmentSettings",
   "containsLocalConnectSources",
   "containsProviderModelCatalogPatch",
   "containsNativeSettingsSections",

@@ -107,6 +107,7 @@ function Clear-SharedProcessManagerState {
 
 Write-Log "Starting patched Codex launcher."
 . (Join-Path $PSScriptRoot "codex-launcher.ps1")
+Import-Module (Join-Path $PSScriptRoot "codex-update-policy.psm1") -Force
 
 function Get-PatcherProjectConfig {
   $merged = [ordered]@{}
@@ -123,19 +124,6 @@ function Get-PatcherProjectConfig {
     }
   }
   return [pscustomobject]$merged
-}
-
-function Resolve-UpdatePolicy {
-  param([object]$Config)
-
-  $policy = ([string]$Config.updatePolicy).Trim().ToLowerInvariant()
-  if ($policy -in @("off", "notify", "auto")) {
-    return $policy
-  }
-  if ($Config.autoRebuildOnLaunch -eq $false) {
-    return "off"
-  }
-  return "notify"
 }
 
 function Show-CodexUpdatePrompt {
@@ -185,7 +173,7 @@ function Show-CodexUpdateFailure {
 
 $projectConfig = Get-PatcherProjectConfig
 $existingLauncherConfig = Get-CodexLauncherConfig
-$updatePolicy = Resolve-UpdatePolicy -Config $projectConfig
+$updatePolicy = Resolve-CodexUpdatePolicy -Config $projectConfig
 
 $sourceCodexHome = Join-Path $env:USERPROFILE ".codex"
 $patchedCodexHome = if ($env:CODEX_PATCHED_HOME) {
@@ -226,23 +214,25 @@ try {
         $checkSummary = $checkResult | ConvertFrom-Json
         Write-Log "Patch check complete. installed=$($checkSummary.installedVersion) patched=$($checkSummary.patchedVersion) needsBuild=$($checkSummary.needsBuild) reasons=$(@($checkSummary.reasons) -join ',')"
 
-        $shouldBuild = $updatePolicy -eq "auto"
+        $promptAccepted = $null
         if ($updatePolicy -eq "notify" -and $checkSummary.needsBuild) {
-          $shouldBuild = Show-CodexUpdatePrompt -State $checkSummary
+          $promptAccepted = Show-CodexUpdatePrompt -State $checkSummary
         }
+        $updatePlan = Get-CodexUpdatePlan -Policy $updatePolicy -NeedsBuild ([bool]$checkSummary.needsBuild) -PromptAccepted $promptAccepted
 
-        if ($checkSummary.needsBuild -and $shouldBuild) {
+        if ($updatePlan.rebuild) {
           $ensureResult = & (Join-Path $PSScriptRoot "ensure-current-codex-patch.ps1") -Quiet
           $ensureSummary = $ensureResult | ConvertFrom-Json
           Write-Log "Patch rebuild complete. installed=$($ensureSummary.installedVersion) rebuilt=$($ensureSummary.rebuilt)"
           $existingLauncherConfig = Get-CodexLauncherConfig
-        } elseif ($checkSummary.needsBuild) {
+        } elseif ($updatePlan.allowStale) {
           $env:CODEX_ALLOW_STALE_PATCHED_LAUNCH = "1"
           Write-Log "User deferred the rebuild; launching the existing immutable clone."
         }
       } catch {
         Show-CodexUpdateFailure -Message $_.Exception.Message
-        if ($updatePolicy -eq "notify") {
+        $failurePlan = Get-CodexUpdatePlan -Policy $updatePolicy -CheckFailed
+        if ($failurePlan.allowStale) {
           $env:CODEX_ALLOW_STALE_PATCHED_LAUNCH = "1"
           Write-Log "Update check failed in notify mode; launching the existing clone. Error: $($_.Exception.Message)"
         } else {

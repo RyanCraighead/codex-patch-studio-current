@@ -35,6 +35,18 @@ async function getJson(name, url) {
   return response.json();
 }
 
+async function getRendererJson(name, url) {
+  const response = await fetch(url, {
+    headers: { Origin: "app://-" },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) fail(`${name} returned HTTP ${response.status}: ${url}`);
+  if (response.headers.get("access-control-allow-origin") !== "app://-") {
+    fail(`${name} did not restrict its renderer CORS header to app://-.`);
+  }
+  return response.json();
+}
+
 async function waitForCatalogShim(launcher, timeoutMs = 60_000) {
   const port = Number(launcher.catalogShim?.basePort || 47851);
   const deadline = Date.now() + timeoutMs;
@@ -71,7 +83,10 @@ async function findPageTarget() {
       lastError = error;
     }
   }
-  throw lastError || new Error(`No Codex CDP target was found on port ${cdpPort}.`);
+  const detail = lastError?.message ? ` Last error: ${lastError.message}` : "";
+  throw new Error(
+    `Codex CDP is unavailable on port ${cdpPort}. Set CODEX_PATCHED_REMOTE_DEBUGGING_PORT=${cdpPort} and relaunch the patched app before running test:runtime.${detail}`,
+  );
 }
 
 async function evaluate(target, expression) {
@@ -168,9 +183,10 @@ async function main() {
     fail("Configured stock chat database sharing is not active.");
   }
 
-  const [imports, patcher, ...providerHealth] = await Promise.all([
-    getJson("import manager", "http://127.0.0.1:4577/api/imports/status"),
+  const [imports, patcher, featureDevelopment, ...providerHealth] = await Promise.all([
+    getJson("import manager", "http://127.0.0.1:4577/api/health"),
     getJson("patch manager", "http://127.0.0.1:4590/api/patch/status"),
+    getRendererJson("feature development", "http://127.0.0.1:4590/api/patch/feature-development"),
     ...[
       ["deepseek", 47731],
       ["zai", 47732],
@@ -183,6 +199,12 @@ async function main() {
       return { provider, port, ok: health.ok === true, hasApiKey: health.hasApiKey === true };
     }),
   ]);
+  if (imports.ok !== true || imports.service !== "codex-import-manager") {
+    fail("Import manager health is invalid.");
+  }
+  if (featureDevelopment.ok !== true || !Array.isArray(featureDevelopment.modules)) {
+    fail("Feature Development bridge returned an invalid catalog.");
+  }
 
   const target = await findPageTarget();
   const catalogShimEnabled = launcher.features?.catalogShim === true && launcher.catalogShim?.enabled === true;
@@ -196,7 +218,8 @@ async function main() {
         providers: Boolean(globalThis.__codexNativeProviderSettings),
         orchestrator: Boolean(globalThis.__codexNativeOrchestrator),
         imports: Boolean(globalThis.__codexNativeImportSettings),
-        patcher: Boolean(globalThis.__codexNativePatcherSettings)
+        patcher: Boolean(globalThis.__codexNativePatcherSettings),
+        featureDevelopment: typeof globalThis.__codexNativePatcherSettings?.openSettingsRoute === 'function'
       },
       preloadInterceptor: typeof globalThis.electronBridge?.registerSendMessageInterceptor === 'function',
       historyHydration: globalThis.__codexPatchStudioHistoryHydration || null
@@ -234,8 +257,9 @@ async function main() {
           manifestBuiltAt: manifest.builtAt,
         },
         services: {
-          importManager: { ok: Array.isArray(imports.statuses) },
+          importManager: { ok: imports.ok === true, service: imports.service },
           patchManager: { ok: Boolean(patcher.defaults && patcher.runtimePaths) },
+          featureDevelopment: { ok: true, modules: featureDevelopment.modules.length },
           catalogShim,
           providers: providerHealth,
         },

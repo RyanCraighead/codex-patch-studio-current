@@ -5,11 +5,34 @@
   "description": "Provides native settings routes, navigation, icons, and local bridge connectivity.",
   "version": "1.0.0",
   "kind": "core",
-  "implementation": "builtin",
+  "implementation": "module",
   "enabledByDefault": true,
   "dependencies": [],
   "conflicts": [],
-  "permissions": ["patch:asar"],
-  "verification": [],
+  "supports": { "codexVersions": ["26.707.x"] },
+  "structuralAnchors": [
+    {
+      "id": "native-settings-insertion-point",
+      "path": "webview/assets/settings-sections-*.js",
+      "includes": "{slug:`agent`},{slug:`personalization`}",
+      "cardinality": { "exact": 1 }
+    }
+  ],
+  "runtime": { "permissions": ["patch:asar"], "localPorts": [] },
+  "native": { "settings": [], "sidebar": [] },
+  "verification": [
+    {
+      "id": "module-receipt",
+      "path": "codex-patch-studio/features/core.settings-shell.json",
+      "includes": "core.settings-shell",
+      "cardinality": { "exact": 1 }
+    },
+    {
+      "id": "feature-development-route",
+      "path": "webview/assets/settings-sections-*.js",
+      "includes": "slug:`feature-development`",
+      "cardinality": { "exact": 1 }
+    }
+  ],
   "distribution": { "upstreamArtifacts": "forbidden" }
 }

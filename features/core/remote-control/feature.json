@@ -5,12 +5,34 @@
   "description": "Enables the app-server remote-control capability and its native setting.",
   "version": "1.0.0",
   "kind": "core",
-  "implementation": "builtin",
+  "implementation": "module",
   "enabledByDefault": true,
   "legacyFeatureIds": ["remoteControl", "remoteControlSettings"],
   "dependencies": [],
   "conflicts": [],
-  "permissions": ["patch:asar"],
-  "verification": [],
+  "supports": { "codexVersions": ["26.707.x"] },
+  "structuralAnchors": [
+    {
+      "id": "remote-control-config-policy",
+      "path": ".vite/build/main-*.js",
+      "includes": "Removed remote_control from config before app-server start",
+      "cardinality": { "exact": 1 }
+    }
+  ],
+  "runtime": { "permissions": ["patch:asar"], "localPorts": [] },
+  "native": {
+    "settings": [
+      { "id": "core.remote-control.settings", "label": "Remote Control", "route": "/settings/agent" }
+    ],
+    "sidebar": []
+  },
+  "verification": [
+    {
+      "id": "module-receipt",
+      "path": "codex-patch-studio/features/core.remote-control.json",
+      "includes": "core.remote-control",
+      "cardinality": { "exact": 1 }
+    }
+  ],
   "distribution": { "upstreamArtifacts": "forbidden" }
 }

@@ -2,7 +2,8 @@
   "use strict";
 
   const ROOT_ID = "codex-native-patcher-settings";
-  const ROUTE_HOST_ID = "codex-native-patcher-settings-route";
+  const PATCHER_ROUTE_HOST_ID = "codex-native-patcher-settings-route";
+  const FEATURE_ROUTE_HOST_ID = "codex-native-feature-development-settings-route";
   const STORAGE_KEY = "codex-native-patcher-settings:v1";
   const PATCH_MANAGER_BASE = "http://127.0.0.1:4590";
 
@@ -146,6 +147,14 @@
     updateStateError: "",
     updateCheckedAt: 0,
     featureModules: { ok: true, modules: [] },
+    featureDevelopment: { ok: true, modules: [] },
+    featureDevelopmentError: "",
+    featureAction: null,
+    featureBusy: false,
+    localFeatureId: "local.",
+    conversionSourceId: "",
+    contributionFeatureId: "",
+    worktreeFeatureId: "",
     lastJob: null,
     runtimeFeatures: Object.fromEntries(RUNTIME_FEATURES.map((feature) => [feature.id, feature.defaultEnabled])),
     buildFeatures: Object.fromEntries(BUILD_FEATURES.map((feature) => [feature.id, feature.defaultEnabled])),
@@ -264,11 +273,51 @@
       });
       if (!response.ok) {
         const text = await response.text().catch(() => "");
-        throw new Error(`${response.status} ${response.statusText}${text ? `: ${text}` : ""}`);
+        let detail = text;
+        try {
+          const parsed = JSON.parse(text);
+          const logs = Array.isArray(parsed.logs) ? `\n${parsed.logs.join("\n")}` : "";
+          detail = `${parsed.error || text}${logs}`;
+        } catch {
+          // Keep the plain response body when it is not JSON.
+        }
+        throw new Error(`${response.status} ${response.statusText}${detail ? `: ${detail}` : ""}`);
       }
       return response.json();
     } finally {
       window.clearTimeout(timeout);
+    }
+  }
+
+  function applyFeatureDevelopmentSnapshot(snapshot) {
+    state.featureDevelopment = snapshot || { ok: false, error: "Feature Development returned no status.", modules: [] };
+    state.featureModules = state.featureDevelopment;
+    state.featureDevelopmentError = state.featureDevelopment.ok ? "" : state.featureDevelopment.error || "Feature catalog is invalid.";
+    const modules = Array.isArray(state.featureDevelopment.modules) ? state.featureDevelopment.modules : [];
+    const localModules = modules.filter((feature) => feature.kind === "local");
+    if (!localModules.some((feature) => feature.id === state.conversionSourceId)) {
+      state.conversionSourceId = localModules[0]?.id || "";
+    }
+    if (!modules.some((feature) => feature.id === state.worktreeFeatureId)) {
+      state.worktreeFeatureId = localModules[0]?.id || modules.find((feature) => feature.kind === "contribution")?.id || modules[0]?.id || "";
+    }
+  }
+
+  async function refreshFeatureDevelopment({ renderAfter = true, showBusy = true } = {}) {
+    if (showBusy) state.featureBusy = true;
+    state.featureDevelopmentError = "";
+    if (renderAfter) render();
+    try {
+      const snapshot = await fetchPatchManager("/api/patch/feature-development", {}, 30000);
+      applyFeatureDevelopmentSnapshot(snapshot);
+      return snapshot;
+    } catch (error) {
+      state.featureDevelopmentError = error.message || String(error);
+      state.featureDevelopment = { ok: false, error: state.featureDevelopmentError, modules: [] };
+      throw error;
+    } finally {
+      if (showBusy) state.featureBusy = false;
+      if (renderAfter) render();
     }
   }
 
@@ -288,14 +337,14 @@
         state.updatePolicyConfigured = updatePolicy.configured === true;
       }
       const defaults = state.patchStatus?.defaults;
-      if (defaults?.features && typeof defaults.features === "object") {
+      const stored = readStoredSettings();
+      if (!stored.buildFeatures && defaults?.features && typeof defaults.features === "object") {
         for (const feature of BUILD_FEATURES) {
           if (Object.prototype.hasOwnProperty.call(defaults.features, feature.id)) {
             state.buildFeatures[feature.id] = defaults.features[feature.id] !== false;
           }
         }
       }
-      const stored = readStoredSettings();
       if (!state.outputRoot && defaults?.outputRoot) state.outputRoot = String(defaults.outputRoot);
       if (!stored.shortcutName && defaults?.shortcutName) state.shortcutName = String(defaults.shortcutName);
       if (!stored.limit && defaults?.limit) state.limit = clampNumber(defaults.limit, 50, 10000, state.limit);
@@ -318,6 +367,11 @@
       } else {
         state.updateState = null;
         state.updateStateError = "";
+      }
+      try {
+        await refreshFeatureDevelopment({ renderAfter: false, showBusy: false });
+      } catch (featureError) {
+        state.featureDevelopmentError = featureError.message || String(featureError);
       }
     } catch (error) {
       state.bridge = "offline";
@@ -384,6 +438,11 @@
         120000
       );
       state.updateCheckedAt = Date.now();
+      try {
+        await refreshFeatureDevelopment({ renderAfter: false, showBusy: false });
+      } catch (featureError) {
+        state.featureDevelopmentError = featureError.message || String(featureError);
+      }
       state.status = state.updateState.needsBuild
         ? "A Codex or patch framework update requires a verified rebuild."
         : "The patched clone is current.";
@@ -397,26 +456,46 @@
     }
   }
 
-  async function persistFeatureModule(id, enabled) {
-    if (state.busy) return;
-    state.busy = true;
+  function featureRequestId(action) {
+    const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    return `feature-${action}-${random}`;
+  }
+
+  async function runFeatureDevelopmentAction(action, payload = {}) {
+    if (state.featureBusy || state.busy) return null;
+    state.featureBusy = true;
     state.error = "";
-    state.status = `${enabled ? "Enabling" : "Disabling"} ${id}...`;
+    state.featureDevelopmentError = "";
+    state.status = `Running Feature Development command: ${action}...`;
     render();
     try {
-      state.featureModules = await fetchPatchManager("/api/patch/feature-module", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, enabled }),
-      });
-      state.status = `${id} ${enabled ? "enabled" : "disabled"}. Rebuild to apply this module.`;
+      const result = await fetchPatchManager(
+        "/api/patch/feature-development/action",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ requestId: featureRequestId(action), action, ...payload }),
+        },
+        ["create-local", "convert-contribution"].includes(action) ? 130000 : 30000
+      );
+      state.featureAction = result;
+      state.status = result.message || `Feature Development command ${action} completed.`;
+      if (result.status) applyFeatureDevelopmentSnapshot(result.status);
+      if (result.job) state.lastJob = result.job;
+      return result;
     } catch (error) {
       state.error = error.message || String(error);
       state.status = state.error;
+      state.featureAction = { ok: false, action, message: state.error, logs: [state.error] };
+      return null;
     } finally {
-      state.busy = false;
+      state.featureBusy = false;
       render();
     }
+  }
+
+  async function persistFeatureModule(id, enabled) {
+    return runFeatureDevelopmentAction("set-enabled", { id, enabled });
   }
 
   async function applyCodexUpdate() {
@@ -575,14 +654,29 @@
     window.clearTimeout(syncTimer);
     syncTimer = window.setTimeout(() => {
       applySettingsNavVisibility();
-      if (document.getElementById(ROUTE_HOST_ID)) {
+      const host = routeHost();
+      if (host && host.dataset.cpxRendered !== "1") {
         render();
       }
     }, 60);
   }
 
+  function activeRouteId() {
+    if (document.getElementById(FEATURE_ROUTE_HOST_ID) || window.location.pathname.replace(/\/+$/, "") === "/settings/feature-development") {
+      return "feature-development";
+    }
+    if (document.getElementById(PATCHER_ROUTE_HOST_ID) || window.location.pathname.replace(/\/+$/, "") === "/settings/patcher") {
+      return "patcher";
+    }
+    return "";
+  }
+
+  function routeHost(routeId = activeRouteId()) {
+    return document.getElementById(routeId === "feature-development" ? FEATURE_ROUTE_HOST_ID : PATCHER_ROUTE_HOST_ID);
+  }
+
   function activeRoute() {
-    return Boolean(document.getElementById(ROUTE_HOST_ID) || window.location.pathname.replace(/\/+$/, "") === "/settings/patcher");
+    return Boolean(activeRouteId());
   }
 
   function navigateNativeRoute(path, options = {}) {
@@ -664,29 +758,189 @@
     `;
   }
 
-  function featureModuleRows() {
-    const modules = (state.featureModules?.modules || []).filter((feature) => feature.configurable);
-    if (!state.featureModules?.ok) {
-      return `<div class="cpx-note cpx-note-bad">${escapeHtml(state.featureModules?.error || "Feature catalog is invalid.")}</div>`;
+  function featureResultKind(status) {
+    if (["passed", "compatible", "completed"].includes(status)) return "ok";
+    if (["failed", "incompatible"].includes(status)) return "bad";
+    if (["pending", "running"].includes(status)) return "pending";
+    return "muted";
+  }
+
+  function featureBadge(label, status, detail = "") {
+    const value = String(status || "unknown");
+    return `<span class="cpx-feature-badge is-${featureResultKind(value)}"${detail ? ` title="${escapeHtml(detail)}"` : ""}><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></span>`;
+  }
+
+  function featureModuleEnabled(feature) {
+    const settingIds = Array.isArray(feature.legacyFeatureIds) ? feature.legacyFeatureIds : [];
+    if (feature.kind === "core" && settingIds.length) {
+      return settingIds.every((id) => state.buildFeatures[id] !== false);
     }
-    if (!modules.length) {
-      return `<div class="cpx-empty">No contribution or local modules are installed. Core features remain available above.</div>`;
+    return feature.enabled !== false;
+  }
+
+  function featureModuleToggle(feature) {
+    const checked = featureModuleEnabled(feature) ? " checked" : "";
+    const disabled = state.featureBusy || state.busy ? " disabled" : "";
+    if (feature.configurable) {
+      return `<label class="cpx-feature-toggle"><span>Enabled</span><input type="checkbox" data-feature-module="${escapeHtml(feature.id)}"${checked}${disabled}></label>`;
     }
-    return `<div class="cpx-list">${modules.map((feature) => `
-      <label class="cpx-toggle-row">
-        <span class="cpx-toggle-copy">
-          <span>${escapeHtml(feature.name)} <small>${escapeHtml(feature.kind)} · ${escapeHtml(feature.version)}</small></span>
+    if (feature.kind === "core" && feature.legacyFeatureIds?.length) {
+      return `<label class="cpx-feature-toggle"><span>Enabled</span><input type="checkbox" data-core-feature-module="${escapeHtml(feature.id)}"${checked}${disabled}></label>`;
+    }
+    return `<label class="cpx-feature-toggle" title="Required framework module"><span>Required</span><input type="checkbox" checked disabled></label>`;
+  }
+
+  function featureModuleRow(feature) {
+    const source = feature.source || {};
+    const repository = source.repository || source.modulePath || "Unknown source";
+    const commit = source.commit ? `${String(source.commit).slice(0, 10)}${source.dirty ? " (dirty)" : ""}` : "Uncommitted";
+    const compatibility = feature.compatibility || {};
+    const supportedVersions = Array.isArray(compatibility.versions) ? compatibility.versions : [];
+    const compatibilityTitle = compatibility.sourceVersion
+      ? supportedVersions.length
+        ? `Codex ${compatibility.sourceVersion}; exact adapters: ${supportedVersions.join(", ")}`
+        : `Codex ${compatibility.sourceVersion}; supported ${compatibility.minimum || "any"} through ${compatibility.maximum || "current"}`
+      : "Build Codex once to determine compatibility.";
+    return `
+      <div class="cpx-feature-row">
+        <div class="cpx-feature-copy">
+          <div class="cpx-feature-title">
+            <strong>${escapeHtml(feature.name || feature.id)}</strong>
+            <span>${escapeHtml(feature.kind)}</span>
+            <span>v${escapeHtml(feature.version || "0.0.0")}</span>
+          </div>
           <small>${escapeHtml(feature.description || feature.id)}</small>
-        </span>
-        <input type="checkbox" data-feature-module="${escapeHtml(feature.id)}"${feature.enabled ? " checked" : ""}>
-      </label>
-    `).join("")}</div>`;
+          <div class="cpx-feature-meta">
+            <span title="${escapeHtml(repository)}"><b>Source</b> ${escapeHtml(repository)}</span>
+            <span title="${escapeHtml(source.commit || "")}"><b>Commit</b> ${escapeHtml(commit)}</span>
+          </div>
+          <div class="cpx-feature-results">
+            ${featureBadge("Compatibility", compatibility.status, compatibilityTitle)}
+            ${featureBadge("Build", feature.build?.status, feature.build?.detail)}
+            ${featureBadge("Test", feature.test?.status, feature.test?.detail)}
+          </div>
+        </div>
+        ${featureModuleToggle(feature)}
+      </div>
+    `;
+  }
+
+  function featureModuleGroup(kind, label) {
+    const modules = (state.featureDevelopment?.modules || []).filter((feature) => feature.kind === kind);
+    return `
+      <div class="cpx-feature-group">
+        <div class="cpx-feature-group-head"><strong>${escapeHtml(label)}</strong><span>${modules.length}</span></div>
+        ${modules.length ? modules.map(featureModuleRow).join("") : `<div class="cpx-empty">No ${escapeHtml(label.toLowerCase())} modules installed.</div>`}
+      </div>
+    `;
+  }
+
+  function featureOptions(modules, selectedId) {
+    if (!modules.length) return `<option value="">No modules available</option>`;
+    return modules.map((feature) => `<option value="${escapeHtml(feature.id)}"${feature.id === selectedId ? " selected" : ""}>${escapeHtml(feature.name || feature.id)} (${escapeHtml(feature.id)})</option>`).join("");
+  }
+
+  function featureActionLog() {
+    if (!state.featureAction) return "";
+    const logs = Array.isArray(state.featureAction.logs) ? state.featureAction.logs : [];
+    return `
+      <div class="cpx-feature-log-head"><strong>${escapeHtml(state.featureAction.message || "Feature command result")}</strong></div>
+      <pre class="cpx-feature-log">${escapeHtml(logs.join("\n") || "Command completed without additional output.")}</pre>
+    `;
+  }
+
+  function featureDevelopmentPanel() {
+    const snapshot = state.featureDevelopment || { modules: [] };
+    const modules = Array.isArray(snapshot.modules) ? snapshot.modules : [];
+    const localModules = modules.filter((feature) => feature.kind === "local");
+    const actionableModules = modules.filter((feature) => feature.source?.worktree || feature.source?.modulePath);
+    const lastBuild = snapshot.lastBuild;
+    return `
+      <section class="cpx-band cpx-wide">
+        <div class="cpx-band-head">
+          <div>
+            <strong>Feature Development</strong>
+            <small>Installed source modules, compatibility, provenance, and packed verification results.</small>
+          </div>
+          <button class="cpx-button cpx-button-sm" type="button" data-action="refresh-features" ${state.featureBusy || state.busy || state.bridge !== "online" ? "disabled" : ""}>Refresh modules</button>
+        </div>
+        ${state.featureDevelopmentError || snapshot.ok === false ? `<div class="cpx-note cpx-note-bad">${escapeHtml(state.featureDevelopmentError || snapshot.error || "Feature catalog is invalid.")}</div>` : `
+          <div class="cpx-feature-overview">
+            ${pill("Installed", modules.length, "accent")}
+            ${pill("Codex", snapshot.sourceVersion || "Unknown", snapshot.sourceVersion ? "ok" : "muted")}
+            ${pill("Last build", lastBuild?.status || "Not run", featureResultKind(lastBuild?.status || "unknown"))}
+          </div>
+          <div class="cpx-feature-groups">
+            ${featureModuleGroup("core", "Core")}
+            ${featureModuleGroup("contribution", "Community")}
+            ${featureModuleGroup("local", "Local")}
+          </div>
+        `}
+        <div class="cpx-feature-commands">
+          <div class="cpx-command-row">
+            <div><strong>Create local feature</strong><small>Scaffold a private module in a dedicated local worktree pinned to the current Codex version.</small></div>
+            <div class="cpx-command-controls">
+              <input class="cpx-input" type="text" data-local-feature-id value="${escapeHtml(state.localFeatureId)}" placeholder="local.my-feature" aria-label="Local feature ID">
+              <button class="cpx-button" type="button" data-action="create-local-feature" ${state.featureBusy || state.busy || state.bridge !== "online" ? "disabled" : ""}>Create local feature</button>
+            </div>
+          </div>
+          <div class="cpx-command-row">
+            <div><strong>Convert to contribution</strong><small>Create a reviewable contribution worktree from a clean local feature workflow.</small></div>
+            <div class="cpx-command-controls cpx-command-controls-three">
+              <select class="cpx-input" data-conversion-source aria-label="Local feature">${featureOptions(localModules, state.conversionSourceId)}</select>
+              <input class="cpx-input" type="text" data-contribution-feature-id value="${escapeHtml(state.contributionFeatureId)}" placeholder="publisher.my-feature" aria-label="Contribution feature ID">
+              <button class="cpx-button" type="button" data-action="convert-contribution" ${state.featureBusy || state.busy || state.bridge !== "online" || !localModules.length ? "disabled" : ""}>Convert to contribution</button>
+            </div>
+          </div>
+          <div class="cpx-command-row">
+            <div><strong>Open worktree</strong><small>Open the selected module's validated Git worktree or source directory.</small></div>
+            <div class="cpx-command-controls">
+              <select class="cpx-input" data-worktree-feature aria-label="Feature worktree">${featureOptions(actionableModules, state.worktreeFeatureId)}</select>
+              <button class="cpx-button" type="button" data-action="open-worktree" ${state.featureBusy || state.busy || state.bridge !== "online" || !actionableModules.length ? "disabled" : ""}>Open worktree</button>
+            </div>
+          </div>
+          <div class="cpx-command-row">
+            <div><strong>Rebuild patched Codex</strong><small>Start a new immutable clone build and keep the last verified clone on failure.</small></div>
+            <div class="cpx-command-controls cpx-command-controls-button">
+              <button class="cpx-button cpx-primary" type="button" data-action="rebuild-feature-codex" ${state.featureBusy || state.busy || state.bridge !== "online" ? "disabled" : ""}>Rebuild patched Codex</button>
+            </div>
+          </div>
+        </div>
+        ${featureActionLog()}
+      </section>
+    `;
   }
 
   function render() {
-    const host = document.getElementById(ROUTE_HOST_ID);
+    const routeId = activeRouteId();
+    const host = routeHost(routeId);
     applySettingsNavVisibility();
     if (!host) return;
+    if (routeId === "feature-development") {
+      host.innerHTML = `
+        <section class="cpx-patcher-page">
+          <header class="cpx-header">
+            <div>
+              <h1>Feature Development</h1>
+              <p>Manage source modules and run the guarded Git, build, and verification workflows.</p>
+            </div>
+            <div class="cpx-header-actions">
+              <button class="cpx-button" type="button" data-action="refresh-features" ${state.featureBusy || state.busy ? "disabled" : ""}>Refresh</button>
+            </div>
+          </header>
+          <div class="cpx-summary">
+            ${pill("Modules", (state.featureDevelopment?.modules || []).length, "accent")}
+            ${pill("Codex", state.featureDevelopment?.sourceVersion || "Unknown", state.featureDevelopment?.sourceVersion ? "ok" : "muted")}
+            ${pill("Patch Manager", state.bridge === "online" ? "Online" : state.bridge === "offline" ? "Offline" : "Unknown", bridgeKind())}
+            ${pill("Status", state.featureBusy || state.busy ? "Working" : state.error ? "Error" : "Ready", statusKind())}
+          </div>
+          <div class="cpx-grid">${featureDevelopmentPanel()}</div>
+        </section>
+      `;
+      host.dataset.cpxRendered = "1";
+      bind(host);
+      return;
+    }
     const defaults = state.patchStatus?.defaults || {};
     host.innerHTML = `
       <section class="cpx-patcher-page">
@@ -754,16 +1008,6 @@
           <section class="cpx-band cpx-wide">
             <div class="cpx-band-head">
               <div>
-                <strong>Feature modules</strong>
-                <small>Source-only contribution and personal modules are disabled until selected and are verified again after packing.</small>
-              </div>
-            </div>
-            ${featureModuleRows()}
-          </section>
-
-          <section class="cpx-band cpx-wide">
-            <div class="cpx-band-head">
-              <div>
                 <strong>Build and launch</strong>
                 <small>${escapeHtml(state.bridgeMessage)}</small>
               </div>
@@ -796,6 +1040,7 @@
         </div>
       </section>
     `;
+    host.dataset.cpxRendered = "1";
     bind(host);
   }
 
@@ -843,6 +1088,9 @@
     host.querySelector('[data-action="refresh-bridge"]')?.addEventListener("click", () => {
       refreshBridge();
     });
+    host.querySelector('[data-action="refresh-features"]')?.addEventListener("click", () => {
+      refreshFeatureDevelopment().catch(() => {});
+    });
     host.querySelector('[data-action="open-manager"]')?.addEventListener("click", openPatchManager);
     host.querySelector('[data-action="build-patch"]')?.addEventListener("click", startPatchBuild);
     host.querySelector('[data-action="launch-current"]')?.addEventListener("click", launchCurrentPatchedCodex);
@@ -853,6 +1101,45 @@
     });
     host.querySelectorAll("[data-feature-module]").forEach((input) => {
       input.addEventListener("change", () => persistFeatureModule(input.dataset.featureModule, Boolean(input.checked)));
+    });
+    host.querySelectorAll("[data-core-feature-module]").forEach((input) => {
+      input.addEventListener("change", () => {
+        const feature = (state.featureDevelopment?.modules || []).find((candidate) => candidate.id === input.dataset.coreFeatureModule);
+        const settingIds = Array.isArray(feature?.legacyFeatureIds) ? feature.legacyFeatureIds : [];
+        for (const id of settingIds) state.buildFeatures[id] = Boolean(input.checked);
+        if (input.checked && settingIds.includes("catalogShim")) state.buildFeatures.chatLimit = false;
+        if (input.checked && settingIds.includes("chatLimit")) state.buildFeatures.catalogShim = false;
+        saveSettings();
+        render();
+      });
+    });
+    host.querySelector("[data-local-feature-id]")?.addEventListener("input", (event) => {
+      state.localFeatureId = String(event.currentTarget.value || "");
+    });
+    host.querySelector("[data-conversion-source]")?.addEventListener("change", (event) => {
+      state.conversionSourceId = String(event.currentTarget.value || "");
+    });
+    host.querySelector("[data-contribution-feature-id]")?.addEventListener("input", (event) => {
+      state.contributionFeatureId = String(event.currentTarget.value || "");
+    });
+    host.querySelector("[data-worktree-feature]")?.addEventListener("change", (event) => {
+      state.worktreeFeatureId = String(event.currentTarget.value || "");
+    });
+    host.querySelector('[data-action="create-local-feature"]')?.addEventListener("click", () => {
+      runFeatureDevelopmentAction("create-local", { id: state.localFeatureId.trim() });
+    });
+    host.querySelector('[data-action="convert-contribution"]')?.addEventListener("click", () => {
+      runFeatureDevelopmentAction("convert-contribution", {
+        id: state.conversionSourceId,
+        targetId: state.contributionFeatureId.trim(),
+      });
+    });
+    host.querySelector('[data-action="open-worktree"]')?.addEventListener("click", () => {
+      runFeatureDevelopmentAction("open-worktree", { id: state.worktreeFeatureId });
+    });
+    host.querySelector('[data-action="rebuild-feature-codex"]')?.addEventListener("click", () => {
+      if (!window.confirm("Rebuild and verify a new patched Codex clone with the selected modules?")) return;
+      runFeatureDevelopmentAction("rebuild", { build: patchPayload() });
     });
     host.querySelector("[data-output-root]")?.addEventListener("input", (event) => {
       state.outputRoot = String(event.currentTarget.value || "");
@@ -1046,6 +1333,155 @@
         flex: 0 0 auto;
         margin: 0;
       }
+      .cpx-feature-overview {
+        border-bottom: 1px solid var(--color-token-border-default, var(--color-token-border));
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 10px 14px;
+      }
+      .cpx-feature-groups,
+      .cpx-feature-group {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .cpx-feature-group + .cpx-feature-group {
+        border-top: 1px solid var(--color-token-border-default, var(--color-token-border));
+      }
+      .cpx-feature-group-head {
+        align-items: center;
+        background: var(--color-token-background-secondary, rgba(127, 127, 127, 0.05));
+        border-bottom: 1px solid var(--color-token-border-subtle, rgba(0,0,0,.07));
+        display: flex;
+        justify-content: space-between;
+        min-height: 32px;
+        padding: 6px 14px;
+      }
+      .cpx-feature-group-head strong,
+      .cpx-feature-group-head span {
+        font-size: 12px;
+        font-weight: 650;
+      }
+      .cpx-feature-group-head span { color: var(--color-token-text-secondary); }
+      .cpx-feature-row {
+        align-items: flex-start;
+        border-bottom: 1px solid var(--color-token-border-subtle, rgba(0,0,0,.07));
+        display: flex;
+        gap: 14px;
+        justify-content: space-between;
+        min-width: 0;
+        padding: 11px 14px;
+      }
+      .cpx-feature-row:last-child { border-bottom: 0; }
+      .cpx-feature-copy {
+        display: grid;
+        flex: 1 1 auto;
+        gap: 6px;
+        min-width: 0;
+      }
+      .cpx-feature-copy > small {
+        color: var(--color-token-text-secondary);
+        font-size: 12px;
+        line-height: 1.35;
+      }
+      .cpx-feature-title {
+        align-items: center;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .cpx-feature-title strong { font-size: 13px; font-weight: 650; }
+      .cpx-feature-title span {
+        border: 1px solid var(--color-token-border-default, var(--color-token-border));
+        border-radius: 4px;
+        color: var(--color-token-text-secondary);
+        font-size: 11px;
+        padding: 1px 5px;
+      }
+      .cpx-feature-meta {
+        display: grid;
+        gap: 4px 12px;
+        grid-template-columns: minmax(0, 1fr) minmax(118px, auto);
+      }
+      .cpx-feature-meta span {
+        color: var(--color-token-text-secondary);
+        font-size: 11px;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .cpx-feature-meta b { color: var(--color-token-text-primary); font-weight: 600; }
+      .cpx-feature-results {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+      .cpx-feature-badge {
+        align-items: center;
+        border: 1px solid var(--color-token-border-default, var(--color-token-border));
+        border-radius: 4px;
+        display: inline-flex;
+        font-size: 10px;
+        gap: 4px;
+        min-height: 20px;
+        padding: 2px 5px;
+      }
+      .cpx-feature-badge span { color: var(--color-token-text-secondary); }
+      .cpx-feature-badge strong { font-size: 10px; font-weight: 650; }
+      .cpx-feature-badge.is-ok { border-color: rgba(34,197,94,.34); }
+      .cpx-feature-badge.is-pending { border-color: rgba(245,158,11,.34); }
+      .cpx-feature-badge.is-bad { border-color: rgba(239,68,68,.34); }
+      .cpx-feature-toggle {
+        align-items: center;
+        color: var(--color-token-text-secondary);
+        display: flex;
+        flex: 0 0 auto;
+        font-size: 11px;
+        gap: 7px;
+        min-height: 24px;
+      }
+      .cpx-feature-toggle input { margin: 0; }
+      .cpx-feature-commands {
+        border-top: 1px solid var(--color-token-border-default, var(--color-token-border));
+        display: flex;
+        flex-direction: column;
+      }
+      .cpx-command-row {
+        border-bottom: 1px solid var(--color-token-border-subtle, rgba(0,0,0,.07));
+        display: grid;
+        gap: 9px;
+        padding: 11px 14px;
+      }
+      .cpx-command-row > div:first-child { display: grid; gap: 3px; }
+      .cpx-command-row strong { font-size: 13px; font-weight: 650; }
+      .cpx-command-row small { color: var(--color-token-text-secondary); font-size: 11px; line-height: 1.35; }
+      .cpx-command-controls {
+        display: grid;
+        gap: 8px;
+        grid-template-columns: minmax(0, 1fr) auto;
+        min-width: 0;
+      }
+      .cpx-command-controls-three { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+      .cpx-command-controls-button { display: flex; justify-content: flex-end; }
+      .cpx-feature-log-head {
+        border-top: 1px solid var(--color-token-border-default, var(--color-token-border));
+        padding: 10px 14px 0;
+      }
+      .cpx-feature-log-head strong { font-size: 12px; }
+      .cpx-feature-log {
+        color: var(--color-token-text-secondary);
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 11px;
+        line-height: 1.4;
+        margin: 0;
+        max-height: 220px;
+        overflow: auto;
+        padding: 9px 14px 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
       .cpx-build-form {
         display: grid;
         gap: 10px;
@@ -1158,16 +1594,27 @@
           width: 100%;
         }
         .cpx-policy-grid { grid-template-columns: 1fr; }
+        .cpx-feature-row { align-items: stretch; flex-direction: column; }
+        .cpx-feature-toggle { justify-content: flex-end; }
+        .cpx-feature-meta { grid-template-columns: 1fr; }
+        .cpx-command-controls,
+        .cpx-command-controls-three { grid-template-columns: 1fr; }
+        .cpx-command-controls .cpx-button { width: 100%; }
+        .cpx-command-controls-button { display: grid; }
       }
     `;
     document.head.append(style);
   }
 
-  function openSettingsRoute() {
-    if (!activeRoute()) {
-      navigateNativeRoute("/settings/patcher");
+  function openSettingsRoute(routeId = "patcher") {
+    const targetRoute = routeId === "feature-development" ? "feature-development" : "patcher";
+    if (activeRouteId() !== targetRoute) {
+      navigateNativeRoute(`/settings/${targetRoute}`);
     }
     render();
+    if (targetRoute === "feature-development") {
+      refreshFeatureDevelopment({ showBusy: false }).catch(() => {});
+    }
   }
 
   function startObserver() {
@@ -1176,8 +1623,8 @@
     routeObserver.observe(document.body, { childList: true, subtree: true });
     window.addEventListener("popstate", scheduleSync);
     window.addEventListener("codex-native-settings-route", (event) => {
-      if (event.detail?.id === "patcher") {
-        openSettingsRoute();
+      if (["patcher", "feature-development"].includes(event.detail?.id)) {
+        openSettingsRoute(event.detail.id);
       }
     });
   }

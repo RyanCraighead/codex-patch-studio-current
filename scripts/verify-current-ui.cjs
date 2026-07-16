@@ -30,9 +30,16 @@ async function pageTarget() {
       lastError = error;
     }
   }
-  if (!targets) throw lastError || new Error("CDP endpoint is unavailable.");
+  if (!targets) {
+    const detail = lastError?.message ? ` Last error: ${lastError.message}` : "";
+    throw new Error(
+      `Codex CDP is unavailable on port ${port}. Set CODEX_PATCHED_REMOTE_DEBUGGING_PORT=${port} and relaunch the patched app before running test:ui.${detail}`,
+    );
+  }
   const target = targets.find((entry) => entry.type === "page" && entry.url === "app://-/index.html") || targets[0];
-  if (!target?.webSocketDebuggerUrl) throw new Error("No Codex page target exposed by CDP.");
+  if (!target?.webSocketDebuggerUrl) {
+    throw new Error(`No Codex page target is exposed by CDP on port ${port}. Relaunch the patched app and retry.`);
+  }
   return target;
 }
 
@@ -204,6 +211,7 @@ async function snapshot(client, name) {
       orchestrator: Boolean(window.__codexNativeOrchestrator),
       imports: Boolean(window.__codexNativeImportSettings),
       patcher: Boolean(window.__codexNativePatcherSettings),
+      featureDevelopment: typeof window.__codexNativePatcherSettings?.openSettingsRoute === 'function',
       preloadInterceptor: typeof window.electronBridge?.registerSendMessageInterceptor === 'function',
       historyHydration: window.__codexPatchStudioHistoryHydration || null
     },
@@ -282,13 +290,20 @@ async function main() {
   }
 
   let click;
-  for (const section of ["Providers", "Orchestrations", "Imports", "Patcher"]) {
-    click = await clickByText(client, section);
+  const settingsSections = [
+    { label: "Providers", key: "providers" },
+    { label: "Orchestrations", key: "orchestrations" },
+    { label: "Imports", key: "imports" },
+    { label: "Patcher", key: "patcher" },
+    { label: "Feature Development", key: "feature-development" },
+  ];
+  for (const section of settingsSections) {
+    click = await clickByText(client, section.label);
     if (!click.clicked) {
-      throw new Error(`Could not find native settings navigation item: ${section}. Candidates: ${JSON.stringify(click.candidates || [])}`);
+      throw new Error(`Could not find native settings navigation item: ${section.label}. Candidates: ${JSON.stringify(click.candidates || [])}`);
     }
     await delay(1200);
-    if (section === "Imports") {
+    if (section.key === "imports") {
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
         const bodyText = await client.evaluate("document.body?.innerText || ''");
@@ -296,13 +311,13 @@ async function main() {
         await delay(500);
       }
     }
-    const key = section.toLowerCase();
+    const key = section.key;
     results.views[key] = await snapshot(client, `03-${key}`);
     if (/403 Forbidden|Cross-site POST requests are not allowed|RangeError:|Import manager is not reachable/i.test(results.views[key].text)) {
-      throw new Error(`${section} route rendered a fatal bridge error: ${results.views[key].text.slice(0, 1200)}`);
+      throw new Error(`${section.label} route rendered a fatal bridge error: ${results.views[key].text.slice(0, 1200)}`);
     }
-    if (!results.views[key].text.toLowerCase().includes(key.slice(0, -1))) {
-      throw new Error(`${section} route rendered without recognizable content.`);
+    if (!results.views[key].text.toLowerCase().includes(section.label.toLowerCase())) {
+      throw new Error(`${section.label} route rendered without recognizable content.`);
     }
   }
 

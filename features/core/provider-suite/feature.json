@@ -5,12 +5,66 @@
   "description": "Adds providers, model routing, prompt tools, personas, and swarm settings.",
   "version": "1.0.0",
   "kind": "core",
-  "implementation": "builtin",
+  "implementation": "module",
   "enabledByDefault": true,
   "legacyFeatureIds": ["providerSettings"],
   "dependencies": ["core.settings-shell", "core.reasoning-compat"],
   "conflicts": [],
-  "permissions": ["patch:asar", "bridge:loopback"],
-  "verification": [],
+  "supports": { "codexVersions": ["26.707.x"] },
+  "structuralAnchors": [
+    {
+      "id": "composer-model-menu",
+      "path": "webview/assets/composer-*.js",
+      "includes": "function WO({conversationId:e,hideLabel:t}){",
+      "cardinality": { "exact": 1 }
+    },
+    {
+      "id": "outbound-message-bridge",
+      "path": ".vite/build/preload.js",
+      "includes": "sendMessageFromView:async t=>{t.type===`shared-object-set`",
+      "cardinality": { "exact": 1 }
+    }
+  ],
+  "runtime": {
+    "permissions": ["patch:asar", "bridge:loopback"],
+    "localPorts": [
+      { "name": "deepseek-proxy", "port": 47731, "protocol": "tcp", "host": "127.0.0.1" },
+      { "name": "zai-proxy", "port": 47732, "protocol": "tcp", "host": "127.0.0.1" },
+      { "name": "dashscope-proxy", "port": 47733, "protocol": "tcp", "host": "127.0.0.1" },
+      { "name": "cerebras-proxy", "port": 47734, "protocol": "tcp", "host": "127.0.0.1" }
+    ]
+  },
+  "native": {
+    "settings": [
+      { "id": "core.provider-suite.providers", "label": "Providers", "route": "/settings/providers" },
+      { "id": "core.provider-suite.auto-router", "label": "Auto Router", "route": "/settings/auto-router" },
+      { "id": "core.provider-suite.prompt-tools", "label": "Prompt Tools", "route": "/settings/prompt-tools" },
+      { "id": "core.provider-suite.personas", "label": "Personas", "route": "/settings/personas" },
+      { "id": "core.provider-suite.swarm", "label": "Swarm", "route": "/settings/swarm" }
+    ],
+    "sidebar": [
+      { "id": "core.provider-suite.swarm-sidebar", "label": "Swarm", "route": "/swarm" }
+    ]
+  },
+  "verification": [
+    {
+      "id": "module-receipt",
+      "path": "codex-patch-studio/features/core.provider-suite.json",
+      "includes": "core.provider-suite",
+      "cardinality": { "exact": 1 }
+    },
+    {
+      "id": "provider-catalog",
+      "path": "webview/assets/composer-*.js",
+      "includes": "function cpsProviderCatalog",
+      "cardinality": { "exact": 1 }
+    },
+    {
+      "id": "provider-settings-payload",
+      "path": "webview/assets/codex-native-provider-settings.js",
+      "includes": "window.__codexNativeProviderSettings = {",
+      "cardinality": { "exact": 1 }
+    }
+  ],
   "distribution": { "upstreamArtifacts": "forbidden" }
 }

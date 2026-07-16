@@ -5,12 +5,45 @@
   "description": "Adds native import and repair controls for supported chat sources.",
   "version": "1.0.0",
   "kind": "core",
-  "implementation": "builtin",
+  "implementation": "module",
   "enabledByDefault": true,
   "legacyFeatureIds": ["importSettings"],
   "dependencies": ["core.settings-shell"],
   "conflicts": [],
-  "permissions": ["patch:asar", "bridge:loopback"],
-  "verification": [],
+  "supports": { "codexVersions": ["26.707.x"] },
+  "structuralAnchors": [
+    {
+      "id": "webview-script-insertion-point",
+      "path": "webview/index.html",
+      "includes": "  <meta http-equiv=\"Content-Security-Policy\"",
+      "cardinality": { "exact": 1 }
+    }
+  ],
+  "runtime": {
+    "permissions": ["patch:asar", "bridge:loopback"],
+    "localPorts": [
+      { "name": "import-manager", "port": 4577, "protocol": "tcp", "host": "127.0.0.1" }
+    ]
+  },
+  "native": {
+    "settings": [
+      { "id": "core.imports.settings", "label": "Imports", "route": "/settings/imports" }
+    ],
+    "sidebar": []
+  },
+  "verification": [
+    {
+      "id": "module-receipt",
+      "path": "codex-patch-studio/features/core.imports.json",
+      "includes": "core.imports",
+      "cardinality": { "exact": 1 }
+    },
+    {
+      "id": "import-settings-payload",
+      "path": "webview/assets/codex-native-import-settings.js",
+      "includes": "window.__codexNativeImportSettings = {",
+      "cardinality": { "exact": 1 }
+    }
+  ],
   "distribution": { "upstreamArtifacts": "forbidden" }
 }

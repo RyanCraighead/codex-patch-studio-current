@@ -6,6 +6,8 @@ const path = require("path");
 const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 const { patcherFingerprint } = require("./patcher-fingerprint.cjs");
+const { promoteVerifiedJson, writeJsonAtomic } = require("./atomic-json.cjs");
+const { withBuildLockSync } = require("./build-lock.cjs");
 const {
   applyFeatureModules,
   discoverFeatureModules,
@@ -68,22 +70,28 @@ Options:
 }
 
 function parseArgs(argv) {
+  const configuredBuildFeatures =
+    projectConfig.buildFeatures && typeof projectConfig.buildFeatures === "object" && !Array.isArray(projectConfig.buildFeatures)
+      ? projectConfig.buildFeatures
+      : {};
+  const configuredFeature = (id, fallback) =>
+    Object.prototype.hasOwnProperty.call(configuredBuildFeatures, id) ? configuredBuildFeatures[id] !== false : fallback;
   const options = {
     limit: Number(projectConfig.chatLimit || 1000),
     sourceAppDir: null,
     sourceAsar: null,
-    enableCatalogShim: true,
-    enableChatLimit: false,
-    enableRemoteControl: true,
-    enableRemoteControlSettings: true,
-    enableNativeOrchestrator: true,
-    enableProviderSettings: true,
-    enableImportSettings: true,
-    enablePatcherSettings: true,
+    enableCatalogShim: configuredFeature("catalogShim", true),
+    enableChatLimit: configuredFeature("chatLimit", false),
+    enableRemoteControl: configuredFeature("remoteControl", true),
+    enableRemoteControlSettings: configuredFeature("remoteControlSettings", true),
+    enableNativeOrchestrator: configuredFeature("nativeOrchestrator", true),
+    enableProviderSettings: configuredFeature("providerSettings", true),
+    enableImportSettings: configuredFeature("importSettings", true),
+    enablePatcherSettings: configuredFeature("patcherSettings", true),
     enableFeatureModules: true,
     enabledFeatureModules: [],
-    forceMainWindowStartup: false,
-    createShortcut: true,
+    forceMainWindowStartup: configuredFeature("forceMainWindowStartup", false),
+    createShortcut: configuredFeature("shortcut", true),
     shortcutName: projectConfig.shortcutName || "Codex Patch Studio Current",
     shortcutDir: null,
     outputRoot: defaultOutputRoot,
@@ -111,10 +119,12 @@ function parseArgs(argv) {
       options.enableCatalogShim = false;
     } else if (arg === "--catalog-shim") {
       options.enableCatalogShim = true;
+      options.enableChatLimit = false;
     } else if (arg === "--no-chat-limit") {
       options.enableChatLimit = false;
     } else if (arg === "--chat-limit") {
       options.enableChatLimit = true;
+      options.enableCatalogShim = false;
     } else if (arg === "--no-remote-control") {
       options.enableRemoteControl = false;
     } else if (arg === "--no-remote-control-settings") {
@@ -207,6 +217,39 @@ function sha256File(filePath) {
     fs.closeSync(fd);
   }
   return hash.digest("hex");
+}
+
+function snapshotJavaScriptHashes(rootPath) {
+  const hashes = new Map();
+  const pending = [rootPath];
+  while (pending.length) {
+    const directory = pending.pop();
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const filePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(filePath);
+      else if (entry.isFile() && entry.name.toLowerCase().endsWith(".js")) {
+        hashes.set(path.relative(rootPath, filePath).replace(/\\/g, "/"), sha256File(filePath));
+      }
+    }
+  }
+  return hashes;
+}
+
+function changedJavaScriptPaths(rootPath, baselineHashes) {
+  return [...snapshotJavaScriptHashes(rootPath).entries()]
+    .filter(([relativePath, hash]) => baselineHashes.get(relativePath) !== hash)
+    .map(([relativePath]) => relativePath)
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function assertJavaScriptPathsSyntax(rootPath, relativePaths, label) {
+  for (const relativePath of relativePaths) {
+    const filePath = path.resolve(rootPath, relativePath);
+    assertInside(rootPath, filePath, `${label} JavaScript path`);
+    if (!exists(filePath)) throw new Error(`${label} JavaScript file is missing: ${relativePath}`);
+    assertJsModuleSyntax(filePath, `${label}: ${relativePath}`);
+  }
+  return [...relativePaths];
 }
 
 function compatibilityForSource(source) {
@@ -913,12 +956,10 @@ function patchComposerProviderModels(extractDir) {
     next = patched.text;
     patches.push({ label: "current composer provider model catalog source", count: patched.count });
 
-    patched = replaceExactly(
-      next,
-      "onSelectModel:(t,r)=>{fr(n,kr,{model:t}),b&&t!==u.model&&n.get(lt).info((0,LE.jsx)(K,{id:`composer.modelChangeDuringConversationWarning.toast`,defaultMessage:`Changing models mid-conversation will degrade performance.`,description:`Warning toast shown when user changes model during an ongoing conversation`}),{id:`composer.modelChangeDuringConversationWarning.${e}`}),d(t,r)}",
-      "onSelectModel:(t,r)=>{fr(n,kr,{model:t}),b&&t!==u.model&&n.get(lt).info((0,LE.jsx)(K,{id:`composer.modelChangeDuringConversationWarning.toast`,defaultMessage:`Changing models mid-conversation will degrade performance.`,description:`Warning toast shown when user changes model during an ongoing conversation`}),{id:`composer.modelChangeDuringConversationWarning.${e}`});let i=Aa(c,t)?.providerId,a=globalThis.__codexNativeProviderSettings?.selectModelFromNativeMenu?.({model:t,providerId:i,reasoningEffort:r});a&&typeof a.then===`function`?a.then(()=>d(t,r)).catch(()=>d(t,r)):d(t,r)}",
-      "current composer provider switch on model select"
-    );
+    const currentSelectTail = "}),{id:`composer.modelChangeDuringConversationWarning.${e}`}),d(t,r)}";
+    const currentSelectReplacement =
+      "}),{id:`composer.modelChangeDuringConversationWarning.${e}`});let i=Aa(c,t)?.providerId,a=globalThis.__codexNativeProviderSettings?.selectModelFromNativeMenu?.({model:t,providerId:i,reasoningEffort:r});a&&typeof a.then===`function`?a.then(()=>d(t,r)).catch(()=>d(t,r)):d(t,r)}";
+    patched = replaceExactly(next, currentSelectTail, currentSelectReplacement, "current composer provider switch tail");
     next = patched.text;
     patches.push({ label: "current composer provider switch on model select", count: patched.count });
   } else if (next.includes(latestHelperMarker)) {
@@ -926,23 +967,35 @@ function patchComposerProviderModels(extractDir) {
     next = patched.text;
     patches.push({ label: "latest composer provider catalog helper", count: patched.count });
 
-    patched = replaceExactly(
-      next,
-      "{data:d,status:f}=So({hostId:a.hostId}),m=d?.models,{modelSettings:h,setModelAndReasoningEffort:g}=vo(e),y=h.model;_(Wi,e);let{data:b}=_(to,{cwd:a.cwd,hostId:a.hostId}),{serviceTierSettings:x,setServiceTier:S}=jo(e),",
-      "{data:d,status:f}=So({hostId:a.hostId}),{modelSettings:h,setModelAndReasoningEffort:g}=vo(e);_(Wi,e);let{data:b}=_(to,{cwd:a.cwd,hostId:a.hostId}),m=cpsProviderCatalog(d?.models,b),y=cpsSelectedModel(h.model),{serviceTierSettings:x,setServiceTier:S}=jo(e),",
-      "latest composer provider model catalog source"
-    );
-    next = patched.text;
-    patches.push({ label: "latest composer provider model catalog source", count: patched.count });
+    const latestCatalogEdits = [
+      [",m=d?.models,{modelSettings:h", ",{modelSettings:h", "latest composer native model list removal"],
+      ["=vo(e),y=h.model;_(Wi,e);", "=vo(e);_(Wi,e);", "latest composer selected model relocation"],
+      [
+        "let{data:b}=_(to,{cwd:a.cwd,hostId:a.hostId}),{serviceTierSettings:x",
+        "let{data:b}=_(to,{cwd:a.cwd,hostId:a.hostId}),m=cpsProviderCatalog(d?.models,b),y=cpsSelectedModel(h.model),{serviceTierSettings:x",
+        "latest composer provider model catalog source",
+      ],
+    ];
+    for (const [from, to, label] of latestCatalogEdits) {
+      patched = replaceExactly(next, from, to, label);
+      next = patched.text;
+      patches.push({ label, count: patched.count });
+    }
 
-    patched = replaceExactly(
-      next,
-      "function Ce(t,r){return t===y?r!=null&&r!==B&&Fa(n,Zr,{reasoningEffort:r}):Fa(n,di,{model:t}),T&&t!==y&&!ba(y,t)&&n.get(Nn).info((0,YO.jsx)(Q,{id:`composer.modelChangeDuringConversationWarning.toast`,defaultMessage:`Changing models mid-conversation will degrade performance.`,description:`Warning toast shown when user changes model during an ongoing conversation`}),{id:`composer.modelChangeDuringConversationWarning.${e}`}),g(t,r)}",
-      "function Ce(t,r){t===y?r!=null&&r!==B&&Fa(n,Zr,{reasoningEffort:r}):Fa(n,di,{model:t});T&&t!==y&&!ba(y,t)&&n.get(Nn).info((0,YO.jsx)(Q,{id:`composer.modelChangeDuringConversationWarning.toast`,defaultMessage:`Changing models mid-conversation will degrade performance.`,description:`Warning toast shown when user changes model during an ongoing conversation`}),{id:`composer.modelChangeDuringConversationWarning.${e}`});let i=_o(m,t)?.providerId,a=globalThis.__codexNativeProviderSettings?.selectModelFromNativeMenu?.({model:t,providerId:i,reasoningEffort:r});return a&&typeof a.then===`function`?a.then(()=>g(t,r)).catch(()=>g(t,r)):g(t,r)}",
-      "latest composer provider switch on model select"
-    );
-    next = patched.text;
-    patches.push({ label: "latest composer provider switch on model select", count: patched.count });
+    const latestSelectEdits = [
+      ["function Ce(t,r){return t===y?", "function Ce(t,r){t===y?", "latest composer model selection statement"],
+      ["):Fa(n,di,{model:t}),T&&t!==y", "):Fa(n,di,{model:t});T&&t!==y", "latest composer warning statement"],
+      [
+        "}),{id:`composer.modelChangeDuringConversationWarning.${e}`}),g(t,r)}",
+        "}),{id:`composer.modelChangeDuringConversationWarning.${e}`});let i=_o(m,t)?.providerId,a=globalThis.__codexNativeProviderSettings?.selectModelFromNativeMenu?.({model:t,providerId:i,reasoningEffort:r});return a&&typeof a.then===`function`?a.then(()=>g(t,r)).catch(()=>g(t,r)):g(t,r)}",
+        "latest composer provider switch tail",
+      ],
+    ];
+    for (const [from, to, label] of latestSelectEdits) {
+      patched = replaceExactly(next, from, to, label);
+      next = patched.text;
+      patches.push({ label, count: patched.count });
+    }
   } else {
     throw new Error(`Unsupported chat composer shape: ${path.basename(assetPath)}`);
   }
@@ -1067,32 +1120,48 @@ function patchMainProcess(extractDir, options = {}) {
   }
 
   if (options.forceMainWindowStartup) {
-    const forceMainBefore = "E&&he();let _e=ws({listPlugins:e=>le().listPlugins(e)}),ye=xo({";
-    const forceMainAfter =
-      "E&&he();setTimeout(()=>{pe()},1000).unref?.();let _e=ws({listPlugins:e=>le().listPlugins(e)}),ye=xo({";
-    patched = replaceExactly(next, forceMainBefore, forceMainAfter, "force main window startup");
+    const forceMarker = "/*codex-patch-studio:force-main-window*/";
+    const currentAnchor = "let Le=await R.ensureWindow();";
+    const legacyAnchor = "E&&he();let _e=ws({listPlugins:e=>le().listPlugins(e)}),ye=xo({";
+    if (next.includes(forceMarker)) {
+      throw new Error("The force main window startup patch was already present before its module ran.");
+    }
+    if (next.split(currentAnchor).length - 1 === 1) {
+      patched = replaceExactly(
+        next,
+        currentAnchor,
+        `${currentAnchor}${forceMarker}setTimeout(()=>{R.ensureWindow().then(e=>{e&&(e.isMinimized()&&e.restore(),e.show(),e.focus())}).catch(()=>{})},1000).unref?.();`,
+        "current force main window startup"
+      );
+    } else {
+      patched = replaceExactly(
+        next,
+        legacyAnchor,
+        `E&&he();${forceMarker}setTimeout(()=>{pe()},1000).unref?.();let _e=ws({listPlugins:e=>le().listPlugins(e)}),ye=xo({`,
+        "legacy force main window startup"
+      );
+    }
     next = patched.text;
     patches.push({ label: "force main window startup", count: patched.count });
   }
 
   if (options.enableAboutPatcher) {
-    const helpBefore =
+    const currentHelpBefore = "{label:`Send Feedback`,click:le},{type:`separator`},ot,...Rt";
+    const currentHelpAfter =
+      "{label:`About Patcher`,click:()=>{c.dialog.showMessageBox({title:`About Patcher`,message:`Codex Patcher`,detail:`Created by Ryan Craighead\\n\\nUser-controlled native Codex patch layer for providers, imports, orchestration, chat hydration, and local build management.`,type:`info`,buttons:[`OK`],defaultId:0,cancelId:0,noLink:!0})}},{type:`separator`},{label:`Send Feedback`,click:le},{type:`separator`},ot,...Rt";
+    const legacyHelpBefore =
       "{type:`separator`},{label:`Send Feedback`,click:M},je,...Qe,{type:`separator`},{...y(`showKeyboardShortcuts`),click:async()=>{await j(`showKeyboardShortcuts`)}}";
-    const helpAfter =
+    const legacyHelpAfter =
       "{type:`separator`},{label:`About Patcher`,click:()=>{n.dialog.showMessageBox({title:`About Patcher`,message:`Codex Patcher`,detail:`Created by Ryan Craighead\\n\\nUser-controlled native Codex patch layer for providers, imports, orchestration, chat hydration, and local build management.`,type:`info`,buttons:[`OK`],defaultId:0,cancelId:0,noLink:!0})}},{type:`separator`},{label:`Send Feedback`,click:M},je,...Qe,{type:`separator`},{...y(`showKeyboardShortcuts`),click:async()=>{await j(`showKeyboardShortcuts`)}}";
-    try {
-      patched = replaceExactly(next, helpBefore, helpAfter, "Help menu About Patcher insertion");
-      next = patched.text;
-      patches.push({ label: "Help menu About Patcher insertion", count: patched.count });
-    } catch (error) {
-      if (!String(error?.message || "").includes("Expected one Help menu About Patcher insertion patch target")) {
-        throw error;
-      }
-      patches.push({ label: "Help menu About Patcher insertion", count: 0, skipped: true });
-    }
+    patched = next.split(currentHelpBefore).length - 1 === 1
+      ? replaceExactly(next, currentHelpBefore, currentHelpAfter, "current Help menu About Patcher insertion")
+      : replaceExactly(next, legacyHelpBefore, legacyHelpAfter, "legacy Help menu About Patcher insertion");
+    next = patched.text;
+    patches.push({ label: "Help menu About Patcher insertion", count: patched.count });
   }
 
   fs.writeFileSync(mainPath, next, "utf8");
+  assertJsModuleSyntax(mainPath, "current Codex main process");
   return {
     mainRelativePath: path.relative(extractDir, mainPath).replace(/\\/g, "/"),
     patches,
@@ -1102,7 +1171,7 @@ function patchMainProcess(extractDir, options = {}) {
       next.includes("n.remote_control=!0") &&
       /function [A-Za-z_$][\w$]*\(e\)\{return!0\}/.test(next) &&
       !next.includes("Removed remote_control from config before app-server start"),
-    containsForceMainWindowStartupPatch: next.includes("setTimeout(()=>{pe()},1000).unref?.()"),
+    containsForceMainWindowStartupPatch: next.includes("/*codex-patch-studio:force-main-window*/"),
     containsAboutPatcherMenuPatch:
       options.enableAboutPatcher &&
       next.includes("label:`About Patcher`") &&
@@ -1136,7 +1205,232 @@ function patchRemoteControlSettingsVisibility(extractDir) {
   };
 }
 
-function writeNativeSettingsRouteModules(extractDir) {
+const NATIVE_SETTINGS_GROUP_ROUTES = Object.freeze({
+  providers: Object.freeze(["providers", "auto-router", "prompt-tools", "personas", "swarm"]),
+  orchestrations: Object.freeze(["orchestrations"]),
+  imports: Object.freeze(["imports"]),
+  patcher: Object.freeze(["patcher", "feature-development"]),
+});
+
+const NATIVE_SETTINGS_ROUTE_DEFINITIONS = Object.freeze({
+  providers: Object.freeze({
+    id: "providers",
+    objectKey: "providers",
+    label: "Providers",
+    description: "Title for model provider settings section",
+    moduleFile: "codex-native-providers-settings-page.js",
+    exportName: "ProvidersSettings",
+    resultKey: "providerRouteRelativePath",
+  }),
+  "auto-router": Object.freeze({
+    id: "auto-router",
+    objectKey: '"auto-router"',
+    label: "Auto Router",
+    description: "Title for auto model router settings section",
+    moduleFile: "codex-native-auto-router-settings-page.js",
+    exportName: "AutoRouterSettings",
+    resultKey: "autoRouterRouteRelativePath",
+  }),
+  "prompt-tools": Object.freeze({
+    id: "prompt-tools",
+    objectKey: '"prompt-tools"',
+    label: "Prompt Tools",
+    description: "Title for prompt tools settings section",
+    moduleFile: "codex-native-prompt-tools-settings-page.js",
+    exportName: "PromptToolsSettings",
+    resultKey: "promptToolsRouteRelativePath",
+  }),
+  personas: Object.freeze({
+    id: "personas",
+    objectKey: "personas",
+    label: "Personas",
+    description: "Title for persona settings section",
+    moduleFile: "codex-native-personas-settings-page.js",
+    exportName: "PersonasSettings",
+    resultKey: "personasRouteRelativePath",
+  }),
+  swarm: Object.freeze({
+    id: "swarm",
+    objectKey: "swarm",
+    label: "Swarm",
+    description: "Title for swarm settings section",
+    moduleFile: "codex-native-swarm-settings-page.js",
+    exportName: "SwarmSettings",
+    resultKey: "swarmRouteRelativePath",
+  }),
+  orchestrations: Object.freeze({
+    id: "orchestrations",
+    objectKey: "orchestrations",
+    label: "Orchestrations",
+    description: "Title for orchestration settings section",
+    moduleFile: "codex-native-orchestrations-settings-page.js",
+    exportName: "OrchestrationsSettings",
+    resultKey: "orchestratorRouteRelativePath",
+  }),
+  imports: Object.freeze({
+    id: "imports",
+    objectKey: "imports",
+    label: "Imports",
+    description: "Title for chat import settings section",
+    moduleFile: "codex-native-imports-settings-page.js",
+    exportName: "ImportsSettings",
+    resultKey: "importsRouteRelativePath",
+  }),
+  patcher: Object.freeze({
+    id: "patcher",
+    objectKey: "patcher",
+    label: "Patcher",
+    description: "Title for native patcher settings section",
+    moduleFile: "codex-native-patcher-settings-page.js",
+    exportName: "PatcherSettings",
+    resultKey: "patcherRouteRelativePath",
+  }),
+  "feature-development": Object.freeze({
+    id: "feature-development",
+    objectKey: '"feature-development"',
+    label: "Feature Development",
+    description: "Title for source feature development settings section",
+    sectionEntry: "{slug:`feature-development`}",
+    labelEntry: '"feature-development":{id:`settings.nav.feature-development`,defaultMessage:`Feature Development`,description:`Title for source feature development settings section`}',
+    moduleFile: "codex-native-feature-development-settings-page.js",
+    exportName: "FeatureDevelopmentSettings",
+    resultKey: "featureDevelopmentRouteRelativePath",
+  }),
+});
+
+const ALL_NATIVE_SETTINGS_ROUTE_IDS = Object.freeze(
+  Object.values(NATIVE_SETTINGS_GROUP_ROUTES).flat()
+);
+
+function createNativeSettingsPlan(enabledGroups = {}, options = {}) {
+  if (!enabledGroups || typeof enabledGroups !== "object" || Array.isArray(enabledGroups)) {
+    throw new Error("Native settings enabledGroups must be an object.");
+  }
+  const knownGroups = Object.keys(NATIVE_SETTINGS_GROUP_ROUTES);
+  const unknownGroups = Object.keys(enabledGroups).filter((group) => !knownGroups.includes(group));
+  if (unknownGroups.length) {
+    throw new Error(`Unknown native settings groups: ${unknownGroups.join(", ")}.`);
+  }
+  const normalizedGroups = Object.fromEntries(knownGroups.map((group) => [group, enabledGroups[group] === true]));
+  const routeIds = knownGroups.flatMap((group) => normalizedGroups[group] ? NATIVE_SETTINGS_GROUP_ROUTES[group] : []);
+  if (!options.allowEmpty && routeIds.length === 0) {
+    throw new Error("At least one native settings group must be enabled.");
+  }
+  if (new Set(routeIds).size !== routeIds.length) {
+    throw new Error("Native settings groups produced duplicate route ids.");
+  }
+  const routes = routeIds.map((id) => NATIVE_SETTINGS_ROUTE_DEFINITIONS[id]);
+  return {
+    enabledGroups: normalizedGroups,
+    routeIds,
+    routes,
+    quotedSlugs: routeIds.map((id) => `\`${id}\``).join(","),
+    sectionEntries: routes.map((route) => route.sectionEntry || `{slug:\`${route.id}\`}`).join(","),
+    labelEntries: routes
+      .map((route) => route.labelEntry || `${route.objectKey}:{id:\`settings.nav.${route.id}\`,defaultMessage:\`${route.label}\`,description:\`${route.description}\`}`)
+      .join(","),
+    caseEntries: routeIds.map((id) => `case\`${id}\`:`).join(""),
+  };
+}
+
+function splitTopLevelJavaScriptEntries(source) {
+  const entries = [];
+  let start = 0;
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === "`") {
+      quote = character;
+      continue;
+    }
+    if (character === "(" || character === "[" || character === "{") depth += 1;
+    else if (character === ")" || character === "]" || character === "}") depth -= 1;
+    else if (character === "," && depth === 0) {
+      entries.push(source.slice(start, index));
+      start = index + 1;
+    }
+    if (depth < 0) throw new Error("Native settings icon map is structurally unbalanced.");
+  }
+  if (quote || depth !== 0) throw new Error("Native settings icon map is structurally incomplete.");
+  entries.push(source.slice(start));
+  return entries.filter((entry) => entry.length > 0);
+}
+
+function nativeSettingsEntryKey(entry) {
+  const colonIndex = entry.indexOf(":");
+  if (colonIndex <= 0) throw new Error(`Invalid native settings icon entry: ${entry.slice(0, 80)}`);
+  return entry.slice(0, colonIndex).trim().replace(/^["'`]|["'`]$/g, "");
+}
+
+function filterNativeSettingsIconMap(source, enabledRouteIds) {
+  const enabled = new Set(enabledRouteIds);
+  const retainedKeys = new Set(["agent", "git-settings", ...enabledRouteIds]);
+  const entries = splitTopLevelJavaScriptEntries(source);
+  const seen = new Map();
+  for (const entry of entries) {
+    const key = nativeSettingsEntryKey(entry);
+    seen.set(key, (seen.get(key) || 0) + 1);
+  }
+  for (const key of retainedKeys) {
+    if (seen.get(key) !== 1) {
+      throw new Error(`Expected exactly one native settings icon entry for ${key}, found ${seen.get(key) || 0}.`);
+    }
+  }
+  for (const routeId of ALL_NATIVE_SETTINGS_ROUTE_IDS) {
+    if (seen.get(routeId) !== 1) {
+      throw new Error(`Expected exactly one source icon entry for native settings route ${routeId}, found ${seen.get(routeId) || 0}.`);
+    }
+  }
+  return entries.filter((entry) => retainedKeys.has(nativeSettingsEntryKey(entry))).join(",");
+}
+
+function inspectNativeSettingsComposition(input, enabledGroups = {}) {
+  const plan = createNativeSettingsPlan(enabledGroups, { allowEmpty: true });
+  const enabledRouteIds = new Set(plan.routeIds);
+  const routeChecks = {};
+  for (const routeId of ALL_NATIVE_SETTINGS_ROUTE_IDS) {
+    const route = NATIVE_SETTINGS_ROUTE_DEFINITIONS[routeId];
+    const markers = {
+      section: input.settingsSectionsText.includes(`slug:\`${routeId}\``),
+      label: input.settingsSharedText.includes(`defaultMessage:\`${route.label}\``),
+      icon: input.settingsPageText.includes(`${route.objectKey}:e=>(0,`),
+      registry: input.appMainText.includes(`./${route.moduleFile}`),
+      module: input.routeModuleExists[routeId] === true,
+    };
+    const expected = enabledRouteIds.has(routeId);
+    const values = Object.values(markers);
+    routeChecks[routeId] = {
+      expected,
+      markers,
+      ok: expected ? values.every(Boolean) : values.every((value) => !value),
+    };
+  }
+  const missingEnabledRoutes = Object.entries(routeChecks)
+    .filter(([, check]) => check.expected && !check.ok)
+    .map(([routeId]) => routeId);
+  const unexpectedDisabledRoutes = Object.entries(routeChecks)
+    .filter(([, check]) => !check.expected && !check.ok)
+    .map(([routeId]) => routeId);
+  return {
+    ok: missingEnabledRoutes.length === 0 && unexpectedDisabledRoutes.length === 0,
+    enabledGroups: plan.enabledGroups,
+    enabledRouteIds: plan.routeIds,
+    disabledRouteIds: ALL_NATIVE_SETTINGS_ROUTE_IDS.filter((routeId) => !enabledRouteIds.has(routeId)),
+    missingEnabledRoutes,
+    unexpectedDisabledRoutes,
+    routeChecks,
+  };
+}
+
+function writeNativeSettingsRouteModules(extractDir, enabledRouteIds) {
   const assetsDir = path.join(extractDir, "webview", "assets");
   const jsxRuntimeAsset = path.basename(findSingleAsset(extractDir, /^jsx-runtime-.+\.js$/i, "jsx-runtime"));
   const providerModulePath = path.join(assetsDir, "codex-native-providers-settings-page.js");
@@ -1147,6 +1441,7 @@ function writeNativeSettingsRouteModules(extractDir) {
   const orchestratorModulePath = path.join(assetsDir, "codex-native-orchestrations-settings-page.js");
   const importsModulePath = path.join(assetsDir, "codex-native-imports-settings-page.js");
   const patcherModulePath = path.join(assetsDir, "codex-native-patcher-settings-page.js");
+  const featureDevelopmentModulePath = path.join(assetsDir, "codex-native-feature-development-settings-page.js");
   const providerModule = `import{t as jsxRuntime}from"./${jsxRuntimeAsset}";
 const jsx=jsxRuntime();
 function notifyProvidersSettingsRoute(){let attempts=0;const mount=()=>{const host=document.getElementById("codex-native-providers-settings-route");if(!host)return;const api=window.__codexNativeProviderSettings;if(api?.openSettingsRoute){host.dataset.codexNativeMounted="1";api.openSettingsRoute("providers");return}window.dispatchEvent(new CustomEvent("codex-native-settings-route",{detail:{id:"providers"}}));attempts+=1;if(attempts<40)window.setTimeout(mount,100)};requestAnimationFrame(mount)}
@@ -1195,24 +1490,33 @@ function notifyPatcherSettingsRoute(){let attempts=0;const mount=()=>{const host
 function PatcherSettings(){notifyPatcherSettingsRoute();return jsx.jsx("div",{id:"codex-native-patcher-settings-route",className:"h-full min-w-0 overflow-visible",children:jsx.jsx("div",{style:{padding:"28px 34px",fontSize:"13px",color:"var(--color-token-text-secondary, #6b7280)"},children:"Loading native patcher..."})})}
 export{PatcherSettings};
 `;
-  fs.writeFileSync(providerModulePath, providerModule, "utf8");
-  fs.writeFileSync(autoRouterModulePath, autoRouterModule, "utf8");
-  fs.writeFileSync(promptToolsModulePath, promptToolsModule, "utf8");
-  fs.writeFileSync(personasModulePath, personasModule, "utf8");
-  fs.writeFileSync(swarmModulePath, swarmModule, "utf8");
-  fs.writeFileSync(orchestratorModulePath, orchestratorModule, "utf8");
-  fs.writeFileSync(importsModulePath, importsModule, "utf8");
-  fs.writeFileSync(patcherModulePath, patcherModule, "utf8");
-  return {
-    providerRouteRelativePath: path.relative(extractDir, providerModulePath).replace(/\\/g, "/"),
-    autoRouterRouteRelativePath: path.relative(extractDir, autoRouterModulePath).replace(/\\/g, "/"),
-    promptToolsRouteRelativePath: path.relative(extractDir, promptToolsModulePath).replace(/\\/g, "/"),
-    personasRouteRelativePath: path.relative(extractDir, personasModulePath).replace(/\\/g, "/"),
-    swarmRouteRelativePath: path.relative(extractDir, swarmModulePath).replace(/\\/g, "/"),
-    orchestratorRouteRelativePath: path.relative(extractDir, orchestratorModulePath).replace(/\\/g, "/"),
-    importsRouteRelativePath: path.relative(extractDir, importsModulePath).replace(/\\/g, "/"),
-    patcherRouteRelativePath: path.relative(extractDir, patcherModulePath).replace(/\\/g, "/"),
+  const featureDevelopmentModule = `import{t as jsxRuntime}from"./${jsxRuntimeAsset}";
+const jsx=jsxRuntime();
+function notifyFeatureDevelopmentSettingsRoute(){let attempts=0;const mount=()=>{const host=document.getElementById("codex-native-feature-development-settings-route");if(!host){attempts+=1;if(attempts<60)window.setTimeout(mount,100);return}const api=window.__codexNativePatcherSettings;if(api?.openSettingsRoute){host.dataset.codexNativeMounted="1";api.openSettingsRoute("feature-development");return}window.dispatchEvent(new CustomEvent("codex-native-settings-route",{detail:{id:"feature-development"}}));attempts+=1;if(attempts<60)window.setTimeout(mount,100)};requestAnimationFrame(mount)}
+function FeatureDevelopmentSettings(){notifyFeatureDevelopmentSettingsRoute();return jsx.jsx("div",{id:"codex-native-feature-development-settings-route",className:"h-full min-w-0 overflow-visible",children:jsx.jsx("div",{style:{padding:"28px 34px",fontSize:"13px",color:"var(--color-token-text-secondary, #6b7280)"},children:"Loading Feature Development..."})})}
+export{FeatureDevelopmentSettings};
+`;
+  const moduleSpecs = {
+    providers: [providerModulePath, providerModule],
+    "auto-router": [autoRouterModulePath, autoRouterModule],
+    "prompt-tools": [promptToolsModulePath, promptToolsModule],
+    personas: [personasModulePath, personasModule],
+    swarm: [swarmModulePath, swarmModule],
+    orchestrations: [orchestratorModulePath, orchestratorModule],
+    imports: [importsModulePath, importsModule],
+    patcher: [patcherModulePath, patcherModule],
+    "feature-development": [featureDevelopmentModulePath, featureDevelopmentModule],
   };
+  const routeModules = {};
+  for (const routeId of enabledRouteIds) {
+    const route = NATIVE_SETTINGS_ROUTE_DEFINITIONS[routeId];
+    const moduleSpec = moduleSpecs[routeId];
+    if (!route || !moduleSpec) throw new Error(`Unknown native settings route module: ${routeId}.`);
+    const [modulePath, moduleText] = moduleSpec;
+    fs.writeFileSync(modulePath, moduleText, "utf8");
+    routeModules[route.resultKey] = path.relative(extractDir, modulePath).replace(/\\/g, "/");
+  }
+  return routeModules;
 }
 
 function patchCurrentNavigationBridge(extractDir) {
@@ -1245,18 +1549,18 @@ function patchCurrentNavigationBridge(extractDir) {
   };
 }
 
-function patchNativeSettingsSections(extractDir) {
+function patchNativeSettingsSections(extractDir, enabledGroups) {
   const patches = [];
-  const nativeSettingsSlugs = "`providers`,`auto-router`,`prompt-tools`,`personas`,`orchestrations`,`swarm`,`imports`,`patcher`";
-  const nativeSettingsLabelEntries =
-    'providers:{id:`settings.nav.providers`,defaultMessage:`Providers`,description:`Title for model provider settings section`},"auto-router":{id:`settings.nav.auto-router`,defaultMessage:`Auto Router`,description:`Title for auto model router settings section`},"prompt-tools":{id:`settings.nav.prompt-tools`,defaultMessage:`Prompt Tools`,description:`Title for prompt tools settings section`},personas:{id:`settings.nav.personas`,defaultMessage:`Personas`,description:`Title for persona settings section`},orchestrations:{id:`settings.nav.orchestrations`,defaultMessage:`Orchestrations`,description:`Title for orchestration settings section`},swarm:{id:`settings.nav.swarm`,defaultMessage:`Swarm`,description:`Title for swarm settings section`},imports:{id:`settings.nav.imports`,defaultMessage:`Imports`,description:`Title for chat import settings section`},patcher:{id:`settings.nav.patcher`,defaultMessage:`Patcher`,description:`Title for native patcher settings section`}';
+  const plan = createNativeSettingsPlan(enabledGroups);
+  const nativeSettingsSlugs = plan.quotedSlugs;
+  const nativeSettingsLabelEntries = plan.labelEntries;
 
   const sectionsPath = findSettingsSectionsAsset(extractDir);
   let sectionsText = fs.readFileSync(sectionsPath, "utf8");
   let patched = replaceExactly(
     sectionsText,
     "{slug:`agent`},{slug:`personalization`}",
-    "{slug:`agent`},{slug:`providers`},{slug:`auto-router`},{slug:`prompt-tools`},{slug:`personas`},{slug:`orchestrations`},{slug:`swarm`},{slug:`imports`},{slug:`patcher`},{slug:`personalization`}",
+    `{slug:\`agent\`},${plan.sectionEntries},{slug:\`personalization\`}`,
     "settings sections native custom insertion"
   );
   sectionsText = patched.text;
@@ -1297,18 +1601,24 @@ function patchNativeSettingsSections(extractDir) {
     'swarm:e=>(0,Q.jsxs)(`svg`,{width:20,height:20,viewBox:`0 0 20 20`,fill:`none`,xmlns:`http://www.w3.org/2000/svg`,...e,children:[(0,Q.jsx)(`path`,{d:`M10 4.4v4.05M6.15 12.65l2.6-3.05M13.85 12.65l-2.6-3.05M7.55 13.25h4.9M8.35 14.35 10 16.7l1.65-2.35`,stroke:`currentColor`,strokeWidth:1.25,strokeLinecap:`round`,strokeLinejoin:`round`}),(0,Q.jsx)(`circle`,{cx:10,cy:3.55,r:1.6,stroke:`#06b6d4`,strokeWidth:1.2}),(0,Q.jsx)(`circle`,{cx:5.2,cy:13.7,r:1.6,stroke:`#7c3aed`,strokeWidth:1.2}),(0,Q.jsx)(`circle`,{cx:14.8,cy:13.7,r:1.6,stroke:`#7c3aed`,strokeWidth:1.2}),(0,Q.jsx)(`rect`,{x:8.1,y:8.05,width:3.8,height:3.1,rx:.85,stroke:`currentColor`,strokeWidth:1.2}),(0,Q.jsx)(`path`,{d:`M10 16.25v1.6`,stroke:`#d946ef`,strokeWidth:1.2,strokeLinecap:`round`})]})';
   const patcherNativeSettingsIconMapEntry =
     'patcher:e=>(0,Q.jsxs)(`svg`,{width:20,height:20,viewBox:`0 0 20 20`,fill:`none`,xmlns:`http://www.w3.org/2000/svg`,...e,children:[(0,Q.jsx)(`path`,{d:`M4.2 5.35h4.05M11.75 5.35h4.05M4.2 10h4.05M11.75 10h4.05M4.2 14.65h4.05M11.75 14.65h4.05`,stroke:`currentColor`,strokeWidth:1.2,strokeLinecap:`round`}),(0,Q.jsx)(`circle`,{cx:9.75,cy:5.35,r:1.3,stroke:`#06b6d4`,strokeWidth:1.15}),(0,Q.jsx)(`circle`,{cx:10.25,cy:10,r:1.3,stroke:`#7c3aed`,strokeWidth:1.15}),(0,Q.jsx)(`circle`,{cx:9.1,cy:14.65,r:1.3,stroke:`#d946ef`,strokeWidth:1.15}),(0,Q.jsx)(`rect`,{x:2.85,y:2.9,width:14.3,height:14.2,rx:3.1,stroke:`currentColor`,strokeWidth:1.25,opacity:.9})]})';
+  const featureDevelopmentNativeSettingsIconMapEntry =
+    '"feature-development":e=>(0,Q.jsxs)(`svg`,{width:20,height:20,viewBox:`0 0 20 20`,fill:`none`,xmlns:`http://www.w3.org/2000/svg`,...e,children:[(0,Q.jsx)(`path`,{d:`M4.1 4.25h5.1l1.25 1.5h5.45v9.3c0 .88-.72 1.6-1.6 1.6H5.7c-.88 0-1.6-.72-1.6-1.6V4.25Z`,stroke:`currentColor`,strokeWidth:1.3,strokeLinejoin:`round`}),(0,Q.jsx)(`path`,{d:`M7.05 9.2 5.75 10.5l1.3 1.3M12.95 9.2l1.3 1.3-1.3 1.3M11.25 8.5l-2.5 4`,stroke:`url(#cpsFeatureDevelopmentGradient)`,strokeWidth:1.25,strokeLinecap:`round`,strokeLinejoin:`round`}),(0,Q.jsx)(`circle`,{cx:14.95,cy:4.55,r:1.35,stroke:`#d946ef`,strokeWidth:1.15}),(0,Q.jsx)(`defs`,{children:(0,Q.jsxs)(`linearGradient`,{id:`cpsFeatureDevelopmentGradient`,x1:`5.7`,y1:`8.6`,x2:`14.3`,y2:`12.4`,gradientUnits:`userSpaceOnUse`,children:[(0,Q.jsx)(`stop`,{stopColor:`#06b6d4`}),(0,Q.jsx)(`stop`,{offset:1,stopColor:`#7c3aed`})]})})]})';
   const generatedNativeSettingsIconMapWithTools = generatedNativeSettingsIconMap.replace(
     "orchestrations:e=>",
     `${autoRouterNativeSettingsIconMapEntry},${promptToolsNativeSettingsIconMapEntry},${personasNativeSettingsIconMapEntry},${swarmNativeSettingsIconMapEntry},orchestrations:e=>`
   ).replace(
     '"git-settings":v',
-    `${patcherNativeSettingsIconMapEntry},"git-settings":v`
+    `${patcherNativeSettingsIconMapEntry},${featureDevelopmentNativeSettingsIconMapEntry},"git-settings":v`
+  );
+  const generatedEnabledNativeSettingsIconMap = filterNativeSettingsIconMap(
+    generatedNativeSettingsIconMapWithTools,
+    plan.routeIds
   );
   const currentJsxRuntimeMatch = /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\),([A-Za-z_$][\w$]*)=\{"general-settings":/.exec(
     settingsPageText
   );
   const settingsJsxRuntimeAlias = currentJsxRuntimeMatch?.[1] || "Q";
-  const generatedNativeSettingsIconMapForBuild = generatedNativeSettingsIconMapWithTools.replaceAll(
+  const generatedNativeSettingsIconMapForBuild = generatedEnabledNativeSettingsIconMap.replaceAll(
     "Q.",
     `${settingsJsxRuntimeAlias}.`
   );
@@ -1331,31 +1641,31 @@ function patchNativeSettingsSections(extractDir) {
   const settingsPageReplacements = [
     [
       "`appshots`,`agent`,`personalization`",
-      "`appshots`,`agent`,`providers`,`auto-router`,`prompt-tools`,`personas`,`orchestrations`,`swarm`,`imports`,`patcher`,`personalization`",
+      `\`appshots\`,\`agent\`,${nativeSettingsSlugs},\`personalization\``,
       "settings page flat order",
       "`general-settings`,`import`,`profile`,`appearance`,`appshots`,`agent`,`personalization`",
-      "`general-settings`,`import`,`profile`,`appearance`,`appshots`,`agent`,`providers`,`auto-router`,`prompt-tools`,`personas`,`orchestrations`,`swarm`,`imports`,`patcher`,`personalization`",
+      `\`general-settings\`,\`import\`,\`profile\`,\`appearance\`,\`appshots\`,\`agent\`,${nativeSettingsSlugs},\`personalization\``,
     ],
     [
       "`appshots`,`connections`,`git-settings`,`usage`",
-      "`appshots`,`connections`,`git-settings`,`providers`,`auto-router`,`prompt-tools`,`personas`,`orchestrations`,`swarm`,`imports`,`patcher`,`usage`",
+      `\`appshots\`,\`connections\`,\`git-settings\`,${nativeSettingsSlugs},\`usage\``,
       "settings page app group order",
       "slugs:[`general-settings`,`import`,`profile`,`appearance`,`voice`,`agent`,`personalization`",
-      "slugs:[`general-settings`,`import`,`profile`,`appearance`,`voice`,`agent`,`providers`,`auto-router`,`prompt-tools`,`personas`,`orchestrations`,`swarm`,`imports`,`patcher`,`personalization`",
+      `slugs:[\`general-settings\`,\`import\`,\`profile\`,\`appearance\`,\`voice\`,\`agent\`,${nativeSettingsSlugs},\`personalization\``,
     ],
     [
       "case`usage`:return S;case`profile`:return v;",
-      "case`providers`:case`auto-router`:case`prompt-tools`:case`personas`:case`orchestrations`:case`swarm`:case`imports`:case`patcher`:return!0;case`usage`:return S;case`profile`:return v;",
+      `${plan.caseEntries}return!0;case\`usage\`:return S;case\`profile\`:return v;`,
       "settings page visibility switch",
       "case`general-settings`:case`agent`:case`personalization`:return!0;",
-      "case`general-settings`:case`agent`:case`providers`:case`auto-router`:case`prompt-tools`:case`personas`:case`orchestrations`:case`swarm`:case`imports`:case`patcher`:case`personalization`:return!0;",
+      `case\`general-settings\`:case\`agent\`:${plan.caseEntries}case\`personalization\`:return!0;`,
     ],
     [
       "case`appearance`:case`general-settings`:case`agent`:case`git-settings`:case`data-controls`:case`personalization`:H=!1;",
-      "case`appearance`:case`general-settings`:case`agent`:case`providers`:case`auto-router`:case`prompt-tools`:case`personas`:case`orchestrations`:case`swarm`:case`imports`:case`patcher`:case`git-settings`:case`data-controls`:case`personalization`:H=!1;",
+      `case\`appearance\`:case\`general-settings\`:case\`agent\`:${plan.caseEntries}case\`git-settings\`:case\`data-controls\`:case\`personalization\`:H=!1;`,
       "settings page loading redirect switch",
       "case`appearance`:case`pets`:case`general-settings`:case`agent`:case`git-settings`:case`data-controls`:case`code-review`:case`cloud-settings`:case`cloud-environments`:case`personalization`:P=!1;",
-      "case`appearance`:case`pets`:case`general-settings`:case`agent`:case`providers`:case`auto-router`:case`prompt-tools`:case`personas`:case`orchestrations`:case`swarm`:case`imports`:case`patcher`:case`git-settings`:case`data-controls`:case`code-review`:case`cloud-settings`:case`cloud-environments`:case`personalization`:P=!1;",
+      `case\`appearance\`:case\`pets\`:case\`general-settings\`:case\`agent\`:${plan.caseEntries}case\`git-settings\`:case\`data-controls\`:case\`code-review\`:case\`cloud-settings\`:case\`cloud-environments\`:case\`personalization\`:P=!1;`,
     ],
     [
       null,
@@ -1382,12 +1692,16 @@ function patchNativeSettingsSections(extractDir) {
   const legacyLazyAlias = appMainText.match(/"git-settings":\(0,([A-Za-z_$][\w$]*)\.lazy\)/)?.[1];
   const currentLazyAlias = appMainText.match(/agent:([A-Za-z_$][\w$]*)\(async\(\)=>/)?.[1];
   const nativeRouteEntries = currentLazyAlias
-    ? `providers:${currentLazyAlias}(async()=>(await import(\`./codex-native-providers-settings-page.js\`)).ProvidersSettings),"auto-router":${currentLazyAlias}(async()=>(await import(\`./codex-native-auto-router-settings-page.js\`)).AutoRouterSettings),"prompt-tools":${currentLazyAlias}(async()=>(await import(\`./codex-native-prompt-tools-settings-page.js\`)).PromptToolsSettings),personas:${currentLazyAlias}(async()=>(await import(\`./codex-native-personas-settings-page.js\`)).PersonasSettings),orchestrations:${currentLazyAlias}(async()=>(await import(\`./codex-native-orchestrations-settings-page.js\`)).OrchestrationsSettings),swarm:${currentLazyAlias}(async()=>(await import(\`./codex-native-swarm-settings-page.js\`)).SwarmSettings),imports:${currentLazyAlias}(async()=>(await import(\`./codex-native-imports-settings-page.js\`)).ImportsSettings),patcher:${currentLazyAlias}(async()=>(await import(\`./codex-native-patcher-settings-page.js\`)).PatcherSettings),`
-    : `providers:(0,${legacyLazyAlias || "Q"}.lazy)(()=>import(\`./codex-native-providers-settings-page.js\`).then(e=>({default:e.ProvidersSettings}))),"auto-router":(0,${legacyLazyAlias || "Q"}.lazy)(()=>import(\`./codex-native-auto-router-settings-page.js\`).then(e=>({default:e.AutoRouterSettings}))),"prompt-tools":(0,${legacyLazyAlias || "Q"}.lazy)(()=>import(\`./codex-native-prompt-tools-settings-page.js\`).then(e=>({default:e.PromptToolsSettings}))),personas:(0,${legacyLazyAlias || "Q"}.lazy)(()=>import(\`./codex-native-personas-settings-page.js\`).then(e=>({default:e.PersonasSettings}))),orchestrations:(0,${legacyLazyAlias || "Q"}.lazy)(()=>import(\`./codex-native-orchestrations-settings-page.js\`).then(e=>({default:e.OrchestrationsSettings}))),swarm:(0,${legacyLazyAlias || "Q"}.lazy)(()=>import(\`./codex-native-swarm-settings-page.js\`).then(e=>({default:e.SwarmSettings}))),imports:(0,${legacyLazyAlias || "Q"}.lazy)(()=>import(\`./codex-native-imports-settings-page.js\`).then(e=>({default:e.ImportsSettings}))),patcher:(0,${legacyLazyAlias || "Q"}.lazy)(()=>import(\`./codex-native-patcher-settings-page.js\`).then(e=>({default:e.PatcherSettings}))),`;
+    ? plan.routes
+        .map((route) => `${route.objectKey}:${currentLazyAlias}(async()=>(await import(\`./${route.moduleFile}\`)).${route.exportName})`)
+        .join(",")
+    : plan.routes
+        .map((route) => `${route.objectKey}:(0,${legacyLazyAlias || "Q"}.lazy)(()=>import(\`./${route.moduleFile}\`).then(e=>({default:e.${route.exportName}})))`)
+        .join(",");
   patched = replaceExactly(
     appMainText,
     '"git-settings":',
-    `${nativeRouteEntries}"git-settings":`,
+    `${nativeRouteEntries},"git-settings":`,
     "app-main settings route map"
   );
   appMainText = patched.text;
@@ -1399,13 +1713,15 @@ function patchNativeSettingsSections(extractDir) {
     sharedRelativePath: path.relative(extractDir, sharedPath).replace(/\\/g, "/"),
     settingsPageRelativePath: path.relative(extractDir, settingsPagePath).replace(/\\/g, "/"),
     appMainRelativePath: path.relative(extractDir, appMainPath).replace(/\\/g, "/"),
-    routeModules: writeNativeSettingsRouteModules(extractDir),
+    enabledGroups: plan.enabledGroups,
+    routeIds: plan.routeIds,
+    routeModules: writeNativeSettingsRouteModules(extractDir, plan.routeIds),
     patches,
   };
 }
 
 function injectNativeOrchestrator(extractDir) {
-  const sourcePath = path.join(rootDir, "native-patches", "codex-native-orchestrator.js");
+  const sourcePath = path.join(rootDir, "features", "core", "orchestrations", "payload", "codex-native-orchestrator.js");
   if (!exists(sourcePath)) {
     throw new Error(`Missing native orchestrator patch source: ${sourcePath}`);
   }
@@ -1445,7 +1761,7 @@ function injectNativeOrchestrator(extractDir) {
 }
 
 function injectProviderSettings(extractDir) {
-  const sourcePath = path.join(rootDir, "native-patches", "codex-native-provider-settings.js");
+  const sourcePath = path.join(rootDir, "features", "core", "provider-suite", "payload", "codex-native-provider-settings.js");
   if (!exists(sourcePath)) {
     throw new Error(`Missing native provider settings patch source: ${sourcePath}`);
   }
@@ -1485,7 +1801,7 @@ function injectProviderSettings(extractDir) {
 }
 
 function injectPatcherSettings(extractDir) {
-  const sourcePath = path.join(rootDir, "native-patches", "codex-native-patcher-settings.js");
+  const sourcePath = path.join(rootDir, "features", "core", "patcher-ui", "payload", "codex-native-patcher-settings.js");
   if (!exists(sourcePath)) {
     throw new Error(`Missing native patcher settings patch source: ${sourcePath}`);
   }
@@ -1525,7 +1841,7 @@ function injectPatcherSettings(extractDir) {
 }
 
 function injectImportSettings(extractDir) {
-  const sourcePath = path.join(rootDir, "native-patches", "codex-native-import-settings.js");
+  const sourcePath = path.join(rootDir, "features", "core", "imports", "payload", "codex-native-import-settings.js");
   if (!exists(sourcePath)) {
     throw new Error(`Missing native import settings patch source: ${sourcePath}`);
   }
@@ -1752,10 +2068,24 @@ function patchWebviewCspLocalConnections(extractDir) {
   };
 }
 
+function createCoreFeatureVerificationEvidence(featureId, detail = {}) {
+  return Object.freeze({
+    ok: true,
+    featureId,
+    phase: String(detail.phase || "unpacked"),
+    verification: "manifest-markers-and-host-receipt",
+  });
+}
+
 function verifyPackedAsar(asarPath, workRoot, options = {}) {
   const verifyDir = path.join(workRoot, "packed-verification");
   ensureDir(verifyDir);
   runAsar(["extract", asarPath, verifyDir]);
+  const syntaxCheckedJavaScript = assertJavaScriptPathsSyntax(
+    verifyDir,
+    options.changedJavaScriptRelativePaths || [],
+    "packed app.asar"
+  );
   const assetPath = findAppServerManagerAsset(verifyDir);
   const text = fs.readFileSync(assetPath, "utf8");
   const agentSettingsPath = findAgentSettingsAsset(verifyDir);
@@ -1798,15 +2128,47 @@ function verifyPackedAsar(asarPath, workRoot, options = {}) {
   const orchestratorSettingsRoutePath = path.join(verifyDir, "webview", "assets", "codex-native-orchestrations-settings-page.js");
   const importsSettingsRoutePath = path.join(verifyDir, "webview", "assets", "codex-native-imports-settings-page.js");
   const patcherSettingsRoutePath = path.join(verifyDir, "webview", "assets", "codex-native-patcher-settings-page.js");
+  const featureDevelopmentSettingsRoutePath = path.join(verifyDir, "webview", "assets", "codex-native-feature-development-settings-page.js");
+  const nativeSettingsEnabledGroups = {
+    providers: options.enableProviderSettings === true,
+    orchestrations: options.enableNativeOrchestrator === true,
+    imports: options.enableImportSettings === true,
+    patcher: options.enablePatcherSettings === true,
+  };
+  const nativeSettingsRoutePaths = {
+    providers: providerSettingsRoutePath,
+    "auto-router": autoRouterSettingsRoutePath,
+    "prompt-tools": promptToolsSettingsRoutePath,
+    personas: personasSettingsRoutePath,
+    swarm: swarmSettingsRoutePath,
+    orchestrations: orchestratorSettingsRoutePath,
+    imports: importsSettingsRoutePath,
+    patcher: patcherSettingsRoutePath,
+    "feature-development": featureDevelopmentSettingsRoutePath,
+  };
   const indexText = fs.readFileSync(path.join(verifyDir, "webview", "index.html"), "utf8");
+  const nativeSettingsComposition = inspectNativeSettingsComposition(
+    {
+      settingsSectionsText,
+      settingsSharedText,
+      settingsPageText,
+      appMainText,
+      routeModuleExists: Object.fromEntries(
+        Object.entries(nativeSettingsRoutePaths).map(([routeId, routePath]) => [routeId, exists(routePath)])
+      ),
+    },
+    nativeSettingsEnabledGroups
+  );
   const featureModuleVerification = options.resolvedFeatureModules
     ? verifyFeatureModules(options.resolvedFeatureModules, verifyDir, {
         sourceVersion: options.sourceVersion,
         moduleOptions: options.featureModuleOptions,
+        verifyCoreFeature: createCoreFeatureVerificationEvidence,
       })
     : [];
   const limit = options.limit;
   const result = {
+    syntaxCheckedJavaScript,
     featureModules: featureModuleVerification,
     reasoningSummaryRenderingRequired: options.requireReasoningSummaryRendering === true,
     ambientSuggestionRoleFallbackRequired: options.requireAmbientSuggestionRoleFallback === true,
@@ -1890,6 +2252,12 @@ function verifyPackedAsar(asarPath, workRoot, options = {}) {
       patcherSettingsText.includes("codex-native-patcher-settings:v1") &&
       patcherSettingsText.includes("Created by Ryan Craighead") &&
       patcherSettingsText.includes("/api/patch/build"),
+    containsFeatureDevelopmentSettings:
+      exists(patcherSettingsPath) &&
+      patcherSettingsText.includes("Feature Development") &&
+      patcherSettingsText.includes("/api/patch/feature-development/action") &&
+      patcherSettingsText.includes("codex-native-feature-development-settings-route") &&
+      exists(featureDevelopmentSettingsRoutePath),
     containsLocalConnectSources: indexText.includes("http://127.0.0.1:*") && indexText.includes("http://localhost:*"),
     containsProviderModelCatalogPatch:
       composerText.includes("function cpsProviderCatalog") &&
@@ -1911,47 +2279,8 @@ function verifyPackedAsar(asarPath, workRoot, options = {}) {
     containsAmbientSuggestionRoleFallback:
       homeAmbientSuggestionsContentText.includes("return (rt[a]??rt.something_else??[]).flatMap(t=>{") &&
       !homeAmbientSuggestionsContentText.includes("return rt[a].flatMap(t=>{"),
-    containsNativeSettingsSections:
-      settingsSectionsText.includes("slug:`providers`") &&
-      settingsSectionsText.includes("slug:`auto-router`") &&
-      settingsSectionsText.includes("slug:`prompt-tools`") &&
-      settingsSectionsText.includes("slug:`personas`") &&
-      settingsSectionsText.includes("slug:`orchestrations`") &&
-      settingsSectionsText.includes("slug:`swarm`") &&
-      settingsSectionsText.includes("slug:`imports`") &&
-      settingsSectionsText.includes("slug:`patcher`") &&
-      settingsSharedText.includes("defaultMessage:`Providers`") &&
-      settingsSharedText.includes("defaultMessage:`Auto Router`") &&
-      settingsSharedText.includes("defaultMessage:`Prompt Tools`") &&
-      settingsSharedText.includes("defaultMessage:`Personas`") &&
-      settingsSharedText.includes("defaultMessage:`Orchestrations`") &&
-      settingsSharedText.includes("defaultMessage:`Swarm`") &&
-      settingsSharedText.includes("defaultMessage:`Imports`") &&
-      settingsSharedText.includes("defaultMessage:`Patcher`") &&
-      /providers:e=>\(0,[A-Za-z_$][\w$]*\.jsxs\)\(`svg`/.test(settingsPageText) &&
-      /"auto-router":e=>\(0,[A-Za-z_$][\w$]*\.jsxs\)\(`svg`/.test(settingsPageText) &&
-      /"prompt-tools":e=>\(0,[A-Za-z_$][\w$]*\.jsxs\)\(`svg`/.test(settingsPageText) &&
-      /personas:e=>\(0,[A-Za-z_$][\w$]*\.jsxs\)\(`svg`/.test(settingsPageText) &&
-      /swarm:e=>\(0,[A-Za-z_$][\w$]*\.jsxs\)\(`svg`/.test(settingsPageText) &&
-      /orchestrations:e=>\(0,[A-Za-z_$][\w$]*\.jsxs\)\(`svg`/.test(settingsPageText) &&
-      /imports:e=>\(0,[A-Za-z_$][\w$]*\.jsxs\)\(`svg`/.test(settingsPageText) &&
-      /patcher:e=>\(0,[A-Za-z_$][\w$]*\.jsxs\)\(`svg`/.test(settingsPageText) &&
-      appMainText.includes("codex-native-providers-settings-page.js") &&
-      appMainText.includes("codex-native-auto-router-settings-page.js") &&
-      appMainText.includes("codex-native-prompt-tools-settings-page.js") &&
-      appMainText.includes("codex-native-personas-settings-page.js") &&
-      appMainText.includes("codex-native-swarm-settings-page.js") &&
-      appMainText.includes("codex-native-orchestrations-settings-page.js") &&
-      appMainText.includes("codex-native-imports-settings-page.js") &&
-      appMainText.includes("codex-native-patcher-settings-page.js") &&
-      exists(providerSettingsRoutePath) &&
-      exists(autoRouterSettingsRoutePath) &&
-      exists(promptToolsSettingsRoutePath) &&
-      exists(personasSettingsRoutePath) &&
-      exists(swarmSettingsRoutePath) &&
-      exists(orchestratorSettingsRoutePath) &&
-      exists(importsSettingsRoutePath) &&
-      exists(patcherSettingsRoutePath),
+    containsNativeSettingsSections: nativeSettingsComposition.ok,
+    nativeSettingsComposition,
     containsNativeNavigationBridge:
       profileDropdownText.includes("__codexNativeNavigate") &&
       profileDropdownText.includes("globalThis.__codexNativeNavigate=(e,t)=>"),
@@ -1965,7 +2294,7 @@ function verifyPackedAsar(asarPath, workRoot, options = {}) {
       mainText.includes("n.remote_control=!0") &&
       /function [A-Za-z_$][\w$]*\(e\)\{return!0\}/.test(mainText) &&
       !mainText.includes("Removed remote_control from config before app-server start"),
-    containsForceMainWindowStartupPatch: mainText.includes("setTimeout(()=>{pe()},1000).unref?.()"),
+    containsForceMainWindowStartupPatch: mainText.includes("/*codex-patch-studio:force-main-window*/"),
     containsAboutPatcherMenuPatch:
       mainText.includes("label:`About Patcher`") &&
       mainText.includes("Created by Ryan Craighead") &&
@@ -2011,14 +2340,19 @@ function verifyPackedAsar(asarPath, workRoot, options = {}) {
   if (options.enablePatcherSettings && !result.containsPatcherSettings) {
     failures.push("patcher settings");
   }
+  if (options.enablePatcherSettings && !result.containsFeatureDevelopmentSettings) {
+    failures.push("feature development settings");
+  }
   if ((options.enableImportSettings || options.enableProviderSettings || options.enablePatcherSettings) && !result.containsLocalConnectSources) {
     failures.push("local webview connect-src");
   }
   if (options.enableProviderSettings && !result.containsProviderModelCatalogPatch) {
     failures.push("provider model catalog");
   }
-  if ((options.enableProviderSettings || options.enableNativeOrchestrator || options.enableImportSettings || options.enablePatcherSettings) && !result.containsNativeSettingsSections) {
-    failures.push("native settings sections");
+  if (!result.containsNativeSettingsSections) {
+    failures.push(
+      `native settings sections (missing: ${nativeSettingsComposition.missingEnabledRoutes.join(", ") || "none"}; unexpected: ${nativeSettingsComposition.unexpectedDisabledRoutes.join(", ") || "none"})`
+    );
   }
   if (options.enableProviderSettings && !result.containsPreloadOutboundInterceptor) {
     failures.push("preload outbound message interceptor");
@@ -2034,6 +2368,9 @@ function verifyPackedAsar(asarPath, workRoot, options = {}) {
   }
   if (options.forceMainWindowStartup && !result.containsForceMainWindowStartupPatch) {
     failures.push("force main window startup");
+  }
+  if (options.enablePatcherSettings && !result.containsAboutPatcherMenuPatch) {
+    failures.push("About Patcher menu");
   }
   if (failures.length) {
     throw new Error(`Packed app.asar verification failed: ${JSON.stringify(result)}`);
@@ -2065,7 +2402,7 @@ function disableAsarIntegrityFuse(codexExe) {
 }
 
 function writeJson(filePath, value) {
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  writeJsonAtomic(filePath, value);
 }
 
 function selectedFeatures(options) {
@@ -2084,6 +2421,26 @@ function selectedFeatures(options) {
     forceMainWindowStartup: Boolean(options.forceMainWindowStartup),
     shortcut: Boolean(options.createShortcut),
   };
+}
+
+function selectedCoreFeatureModules(options) {
+  const customSettingsEnabled =
+    options.enableNativeOrchestrator ||
+    options.enableProviderSettings ||
+    options.enableImportSettings ||
+    options.enablePatcherSettings;
+  return new Map([
+    ["core.history", Boolean(options.enableCatalogShim)],
+    ["core.eager-history", Boolean(options.enableChatLimit)],
+    ["core.remote-control", Boolean(options.enableRemoteControl || options.enableRemoteControlSettings)],
+    ["core.settings-shell", Boolean(customSettingsEnabled)],
+    ["core.reasoning-compat", true],
+    ["core.provider-suite", Boolean(options.enableProviderSettings)],
+    ["core.orchestrations", Boolean(options.enableNativeOrchestrator)],
+    ["core.imports", Boolean(options.enableImportSettings)],
+    ["core.patcher-ui", Boolean(options.enablePatcherSettings)],
+    ["core.force-main-window", Boolean(options.forceMainWindowStartup)],
+  ]);
 }
 
 function cloneNameFor(source, options) {
@@ -2209,11 +2566,16 @@ function main() {
   );
 
   const features = selectedFeatures(options);
+  const selectedCoreModules = selectedCoreFeatureModules(options);
   const featureCatalog = discoverFeatureModules(rootDir, projectConfig);
   const resolvedFeatureModules = resolveFeatureModules(featureCatalog, {
     sourceVersion: source.version,
     featureModules: projectConfig.featureModules,
-    enabledIds: options.enabledFeatureModules,
+    enabledIds: [
+      ...options.enabledFeatureModules,
+      ...[...selectedCoreModules].filter(([, enabled]) => enabled).map(([id]) => id),
+    ],
+    disabledIds: [...selectedCoreModules].filter(([, enabled]) => !enabled).map(([id]) => id),
     includeExternalModules: options.enableFeatureModules,
     builtinFeatures: features,
   });
@@ -2250,45 +2612,128 @@ function main() {
 
   ensureDir(extractDir);
   runAsar(["extract", targetAsarPath, extractDir]);
+  const baselineJavaScriptHashes = snapshotJavaScriptHashes(extractDir);
   const assetPath = findAppServerManagerAsset(extractDir);
-  const patchResult = options.enableChatLimit ? patchAsset(assetPath, options.limit) : null;
-  const remoteControlMainProcess =
-    options.enableRemoteControl || options.forceMainWindowStartup || options.enablePatcherSettings
-      ? patchMainProcess(extractDir, {
-          enableRemoteControl: options.enableRemoteControl,
-          forceMainWindowStartup: options.forceMainWindowStartup,
-          enableAboutPatcher: options.enablePatcherSettings,
-        })
-      : null;
-  const remoteControlSettings = options.enableRemoteControlSettings ? patchRemoteControlSettingsVisibility(extractDir) : null;
-  const providerModelCatalog = options.enableProviderSettings ? patchComposerProviderModels(extractDir) : null;
-  const preloadOutboundInterceptor = options.enableProviderSettings ? patchPreloadOutboundInterceptor(extractDir) : null;
-  const reasoningSummaryConversion = patchReasoningSummaryConversion(extractDir);
-  const reasoningSummaryRendering = patchReasoningSummaryRendering(extractDir);
-  const ambientSuggestionRoleFallback = patchAmbientSuggestionRoleFallback(extractDir);
-  const nativeNavigationBridge =
-    options.enableNativeOrchestrator || options.enableProviderSettings || options.enableImportSettings || options.enablePatcherSettings
-      ? patchCurrentNavigationBridge(extractDir)
-      : null;
-  const nativeSettingsSections =
-    options.enableNativeOrchestrator || options.enableProviderSettings || options.enableImportSettings || options.enablePatcherSettings
-      ? patchNativeSettingsSections(extractDir)
-      : null;
-  const patcherSettings = options.enablePatcherSettings ? injectPatcherSettings(extractDir) : null;
-  const nativeOrchestrator = options.enableNativeOrchestrator ? injectNativeOrchestrator(extractDir) : null;
-  const providerSettings = options.enableProviderSettings ? injectProviderSettings(extractDir) : null;
-  const importSettings = options.enableImportSettings ? injectImportSettings(extractDir) : null;
-  const defaultPromptCatalog = options.enableProviderSettings
-    ? writeDefaultPromptCatalogAsset(extractDir, targetResourcesDir)
-    : null;
-  const localConnectSrc =
-    options.enableProviderSettings || options.enableImportSettings || options.enablePatcherSettings
-      ? patchWebviewCspLocalConnections(extractDir)
-      : null;
+  const coreOperationDefinitions = new Map([
+    ["history.catalog-shim", { owner: "core.history", run: () => Boolean(options.enableCatalogShim) }],
+    ["eager-history.patch-loader", { owner: "core.eager-history", run: () => patchAsset(assetPath, options.limit) }],
+    [
+      "remote-control.main-process",
+      {
+        owner: "core.remote-control",
+        run: () => options.enableRemoteControl ? patchMainProcess(extractDir, { enableRemoteControl: true }) : null,
+      },
+    ],
+    [
+      "remote-control.settings",
+      {
+        owner: "core.remote-control",
+        run: () => options.enableRemoteControlSettings ? patchRemoteControlSettingsVisibility(extractDir) : null,
+      },
+    ],
+    [
+      "force-main-window.main-process",
+      { owner: "core.force-main-window", run: () => patchMainProcess(extractDir, { forceMainWindowStartup: true }) },
+    ],
+    [
+      "reasoning-compat.summary-conversion",
+      { owner: "core.reasoning-compat", run: () => patchReasoningSummaryConversion(extractDir) },
+    ],
+    [
+      "reasoning-compat.summary-rendering",
+      { owner: "core.reasoning-compat", run: () => patchReasoningSummaryRendering(extractDir) },
+    ],
+    [
+      "reasoning-compat.ambient-role",
+      { owner: "core.reasoning-compat", run: () => patchAmbientSuggestionRoleFallback(extractDir) },
+    ],
+    [
+      "settings-shell.navigation",
+      { owner: "core.settings-shell", run: () => patchCurrentNavigationBridge(extractDir) },
+    ],
+    [
+      "settings-shell.sections",
+      {
+        owner: "core.settings-shell",
+        run: () => patchNativeSettingsSections(extractDir, {
+          providers: options.enableProviderSettings,
+          orchestrations: options.enableNativeOrchestrator,
+          imports: options.enableImportSettings,
+          patcher: options.enablePatcherSettings,
+        }),
+      },
+    ],
+    [
+      "settings-shell.csp",
+      { owner: "core.settings-shell", run: () => patchWebviewCspLocalConnections(extractDir) },
+    ],
+    [
+      "provider-suite.catalog",
+      { owner: "core.provider-suite", run: () => patchComposerProviderModels(extractDir) },
+    ],
+    [
+      "provider-suite.preload",
+      { owner: "core.provider-suite", run: () => patchPreloadOutboundInterceptor(extractDir) },
+    ],
+    [
+      "provider-suite.settings",
+      { owner: "core.provider-suite", run: () => injectProviderSettings(extractDir) },
+    ],
+    [
+      "provider-suite.prompt-catalog",
+      { owner: "core.provider-suite", run: () => writeDefaultPromptCatalogAsset(extractDir, targetResourcesDir) },
+    ],
+    ["orchestrations.inject", { owner: "core.orchestrations", run: () => injectNativeOrchestrator(extractDir) }],
+    ["imports.inject", { owner: "core.imports", run: () => injectImportSettings(extractDir) }],
+    [
+      "patcher-ui.main-process",
+      { owner: "core.patcher-ui", run: () => patchMainProcess(extractDir, { enableAboutPatcher: true }) },
+    ],
+    ["patcher-ui.settings", { owner: "core.patcher-ui", run: () => injectPatcherSettings(extractDir) }],
+  ]);
+  const coreOperationResults = new Map();
+  const runCoreOperation = (featureId, operationId) => {
+    const definition = coreOperationDefinitions.get(operationId);
+    if (!definition) throw new Error(`${featureId}: unknown core patch operation ${operationId}.`);
+    if (definition.owner !== featureId) {
+      throw new Error(`${featureId}: core patch operation ${operationId} is owned by ${definition.owner}.`);
+    }
+    if (!coreOperationResults.has(operationId)) coreOperationResults.set(operationId, definition.run());
+    return coreOperationResults.get(operationId);
+  };
   const featureModuleApplication = applyFeatureModules(resolvedFeatureModules, extractDir, {
     sourceVersion: source.version,
     moduleOptions: projectConfig.featureModuleOptions,
+    runCoreOperation,
+    verifyCoreFeature: createCoreFeatureVerificationEvidence,
   });
+  const featureModuleResults = new Map(featureModuleApplication.map((record) => [record.id, record.result || {}]));
+  const eagerHistoryStep = featureModuleResults.get("core.eager-history") || {};
+  const remoteControlStep = featureModuleResults.get("core.remote-control") || {};
+  const reasoningStep = featureModuleResults.get("core.reasoning-compat") || {};
+  const settingsShellStep = featureModuleResults.get("core.settings-shell") || {};
+  const providerSuiteStep = featureModuleResults.get("core.provider-suite") || {};
+  const orchestrationsStep = featureModuleResults.get("core.orchestrations") || {};
+  const importsStep = featureModuleResults.get("core.imports") || {};
+  const patcherUiStep = featureModuleResults.get("core.patcher-ui") || {};
+  const patchResult = eagerHistoryStep.patchResult || null;
+  const remoteControlMainProcess = remoteControlStep.mainProcess || null;
+  const remoteControlSettings = remoteControlStep.settings || null;
+  const providerModelCatalog = providerSuiteStep.providerModelCatalog || null;
+  const preloadOutboundInterceptor = providerSuiteStep.preloadOutboundInterceptor || null;
+  const reasoningSummaryConversion = reasoningStep.summaryConversion || { skipped: true, assetRelativePath: null };
+  const reasoningSummaryRendering = reasoningStep.summaryRendering || { skipped: true, assetRelativePath: null };
+  const ambientSuggestionRoleFallback = reasoningStep.ambientSuggestionRoleFallback || { skipped: true, assetRelativePath: null };
+  const nativeNavigationBridge = settingsShellStep.navigationBridge || null;
+  const nativeSettingsSections = settingsShellStep.settingsSections || null;
+  const localConnectSrc = settingsShellStep.localConnectSrc || null;
+  const patcherSettings = patcherUiStep.patcherSettings || null;
+  const nativeOrchestrator = orchestrationsStep.nativeOrchestrator || null;
+  const providerSettings = providerSuiteStep.providerSettings || null;
+  const importSettings = importsStep.importSettings || null;
+  const defaultPromptCatalog = providerSuiteStep.defaultPromptCatalog || null;
+  const changedJavaScriptRelativePaths = changedJavaScriptPaths(extractDir, baselineJavaScriptHashes);
+  assertJavaScriptPathsSyntax(extractDir, changedJavaScriptRelativePaths, "patched app.asar source");
   fs.rmSync(targetAsarPath, { force: true });
   runAsar(["pack", extractDir, targetAsarPath]);
   const packedVerification = verifyPackedAsar(targetAsarPath, workRoot, {
@@ -2304,6 +2749,7 @@ function main() {
     sourceVersion: source.version,
     resolvedFeatureModules,
     featureModuleOptions: projectConfig.featureModuleOptions,
+    changedJavaScriptRelativePaths,
     requireReasoningSummaryRendering: reasoningSummaryRendering.skipped !== true,
     requireAmbientSuggestionRoleFallback: ambientSuggestionRoleFallback.skipped !== true,
   });
@@ -2379,20 +2825,19 @@ function main() {
     reasoningSummaryConversionRelativePath: reasoningSummaryConversion.assetRelativePath,
     reasoningSummaryRenderingRelativePath: reasoningSummaryRendering.assetRelativePath,
     ambientSuggestionRoleFallbackRelativePath: ambientSuggestionRoleFallback.assetRelativePath,
+    syntaxCheckedJavaScriptRelativePaths: changedJavaScriptRelativePaths,
     remoteControlMainProcessRelativePath: remoteControlMainProcess?.mainRelativePath || null,
     remoteControlSettingsRelativePath: remoteControlSettings?.assetRelativePath || null,
   };
-  writeJson(launcherConfigPath, launcherConfig);
-
   const launchShortcut = createLaunchShortcut({ codexExe, options });
   if (launchShortcut?.ShortcutPath) {
     launcherConfig.shortcutPath = launchShortcut.ShortcutPath;
     launcherConfig.shortcutName = options.shortcutName;
     launcherConfig.shortcutCreatedAt = new Date().toISOString();
-    writeJson(launcherConfigPath, launcherConfig);
   }
-
-  writeJson(path.join(cloneRoot, "patch-manifest.json"), {
+  launcherConfig.candidateFinalizedAt = new Date().toISOString();
+  const patchManifestPath = path.join(cloneRoot, "patch-manifest.json");
+  const patchManifest = {
     ...launcherConfig,
     launchShortcut,
     patchResult,
@@ -2414,7 +2859,23 @@ function main() {
     featureModuleApplication,
     packedVerification,
     fuseResult,
-  });
+  };
+  writeJson(patchManifestPath, patchManifest);
+  const finalizedManifest = readJsonSafe(patchManifestPath);
+  if (
+    !exists(codexExe) ||
+    !exists(targetAsarPath) ||
+    !finalizedManifest?.packedVerification ||
+    finalizedManifest.cloneRoot !== cloneRoot ||
+    finalizedManifest.codexExe !== codexExe
+  ) {
+    throw new Error("Candidate finalization failed before launcher promotion.");
+  }
+  promoteVerifiedJson(launcherConfigPath, launcherConfig, () => ({
+    packedVerification,
+    patchManifestPath,
+    candidateFinalizedAt: launcherConfig.candidateFinalizedAt,
+  }));
 
   if (!options.keepWork) {
     fs.rmSync(workRoot, { recursive: true, force: true });
@@ -2476,7 +2937,7 @@ function main() {
 }
 
 try {
-  main();
+  withBuildLockSync(rootDir, main);
 } catch (error) {
   console.error(error.stack || error.message);
   process.exit(1);

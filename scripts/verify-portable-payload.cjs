@@ -63,12 +63,22 @@ const sqliteExecutable = required(path.join("tools", "sqlite3.exe"));
 required(path.join("node_modules", "classic-level", "package.json"));
 required(path.join("node_modules", "ws", "package.json"));
 required(path.join("scripts", "launch-patched-codex.ps1"));
+required(path.join("scripts", "codex-update-policy.psm1"));
+required(path.join("scripts", "atomic-json.cjs"));
+required(path.join("scripts", "build-lock.cjs"));
+required(path.join("scripts", "feature-development-workflow.cjs"));
+required(path.join("scripts", "run-tests.cjs"));
+required(path.join("scripts", "check-source-only.cjs"));
+required(path.join("scripts", "verify-portable-payload.cjs"));
 required(path.join("scripts", "export-augment-webview-state.cjs"));
-required(path.join("native-patches", "codex-native-provider-settings.js"));
+required(path.join("features", "core", "provider-suite", "payload", "codex-native-provider-settings.js"));
 
 const sourceManifestPath = required("bundle-source.json");
 const sourceManifestText = fs.readFileSync(sourceManifestPath, "utf8").replace(/^\uFEFF/, "");
 const sourceManifest = JSON.parse(sourceManifestText);
+if (typeof sourceManifest.portableElectronProfile !== "boolean") {
+  throw new Error("Portable source manifest portableElectronProfile must be true or false");
+}
 for (const forbiddenField of ["sourceAppDir", "sourceConfigPath"]) {
   if (Object.hasOwn(sourceManifest, forbiddenField)) {
     throw new Error(`Portable source manifest leaks ${forbiddenField}`);
@@ -106,6 +116,23 @@ if (runtimeMode) {
   }
   if (!path.resolve(String(runtimeLauncher.codexExe || "")).startsWith(`${normalizedRoot}${path.sep}`)) {
     throw new Error("Initialized portable runtime launcher points outside its extracted root.");
+  }
+  if (typeof runtimeLauncher.portableElectronProfile !== "boolean") {
+    throw new Error("Initialized portable runtime launcher has no explicit Electron profile mode.");
+  }
+  if (runtimeLauncher.portableElectronProfile !== sourceManifest.portableElectronProfile) {
+    throw new Error("Initialized portable runtime launcher changed the packaged Electron profile mode.");
+  }
+  const electronUserDataPath = path.resolve(String(runtimeLauncher.electronUserDataPath || ""));
+  const expectedElectronUserDataPath = sourceManifest.portableElectronProfile
+    ? path.resolve(String(runtimeLauncher.profileRoot || ""), "electron-user-data")
+    : path.resolve(
+      String(process.env.LOCALAPPDATA || ""),
+      "CodexPatchStudioCurrent",
+      "electron-user-data",
+    );
+  if (electronUserDataPath.toLowerCase() !== expectedElectronUserDataPath.toLowerCase()) {
+    throw new Error("Initialized portable runtime launcher selected the wrong Electron profile path.");
   }
 }
 
@@ -159,5 +186,6 @@ process.stdout.write(`${JSON.stringify({
   privateRuntimeFilesPresent: false,
   generatedLauncherConfigPresent: fs.existsSync(runtimeLauncherPath),
   verificationMode: runtimeMode ? "initialized-runtime" : "dormant-payload",
+  portableElectronProfile: sourceManifest.portableElectronProfile,
   localSourcePathsPresent: /sourceAppDir|sourceConfigPath/.test(sourceManifestText),
 }, null, 2)}\n`);

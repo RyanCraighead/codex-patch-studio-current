@@ -244,6 +244,7 @@ $shareChatDatabaseWithStock = Get-ExplicitBooleanSetting `
   -Configs @($config, $projectConfig) `
   -Name "shareChatDatabaseWithStock" `
   -Default $false
+$portableElectronProfileEnabled = $PortableElectronProfile.IsPresent
 $sourceAppDir = [string]$config.appDir
 if (-not $sourceAppDir -or -not (Test-Path -LiteralPath $sourceAppDir)) {
   throw "Patched app directory not found from launcher config: $sourceAppDir"
@@ -311,6 +312,7 @@ New-Item -ItemType Directory -Force -Path $payloadScriptsDir | Out-Null
 $runtimeScripts = @(
   "codex-launcher.ps1",
   "launch-patched-codex.ps1",
+  "codex-update-policy.psm1",
   "initialize-patched-codex-home.ps1",
   "start-codex-provider-proxies.ps1",
   "start-codex-import-manager.ps1",
@@ -319,8 +321,14 @@ $runtimeScripts = @(
   "codex-all-chats-shim.cjs",
   "codex-responses-chat-proxy.cjs",
   "build-patched-codex-app.cjs",
+  "atomic-json.cjs",
+  "build-lock.cjs",
   "feature-registry.cjs",
+  "feature-development-workflow.cjs",
+  "run-tests.cjs",
+  "check-source-only.cjs",
   "patcher-fingerprint.cjs",
+  "verify-portable-payload.cjs",
   "ensure-current-codex-patch.ps1",
   "create-patched-codex-shortcut.ps1",
   "package-patched-codex-single-exe.ps1",
@@ -445,8 +453,30 @@ $sourceManifest = [ordered]@{
   featureModules = $config.featureModules
   catalogShim = $config.catalogShim
   shareChatDatabaseWithStock = $shareChatDatabaseWithStock
+  portableElectronProfile = $portableElectronProfileEnabled
 }
 $sourceManifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $payloadRoot "bundle-source.json") -Encoding UTF8
+
+$payloadVerifierPath = Join-Path $payloadRoot "scripts\verify-portable-payload.cjs"
+Write-Host "Verifying dormant portable payload before compression."
+$dormantVerificationJson = & $fingerprintNode $payloadVerifierPath $payloadRoot
+$dormantVerificationExitCode = $LASTEXITCODE
+if ($dormantVerificationExitCode -ne 0) {
+  throw "Dormant portable payload verification failed with exit code $dormantVerificationExitCode."
+}
+try {
+  $dormantVerification = ($dormantVerificationJson -join [Environment]::NewLine) | ConvertFrom-Json
+} catch {
+  throw "Dormant portable payload verification returned invalid JSON: $($_.Exception.Message)"
+}
+if (
+  ($dormantVerification.ok -isnot [bool]) -or
+  (-not [bool]$dormantVerification.ok) -or
+  ([string]$dormantVerification.verificationMode -ne "dormant-payload") -or
+  ($dormantVerification.generatedLauncherConfigPresent -ne $false)
+) {
+  throw "Dormant portable payload verification did not return an explicit clean dormant-payload result."
+}
 
 Write-Host "Compressing payload with long-path-safe 7-Zip. This can take a few minutes."
 $sevenZip = Find-SevenZipTool
@@ -456,8 +486,10 @@ Copy-Item -LiteralPath $sevenZip -Destination $bundledSevenZip -Force
 $innerSevenZipArgs = @(
   "a",
   "-t7z",
-  "-mx=7",
-  "-mmt=on",
+  "-mx=5",
+  "-m0=lzma2",
+  "-md=64m",
+  "-mmt=2",
   $payloadArchive,
   (Join-Path $payloadRoot "*")
 )
@@ -489,6 +521,7 @@ $manifest = [ordered]@{
   featureModules = $sourceManifest.featureModules
   catalogShim = $sourceManifest.catalogShim
   shareChatDatabaseWithStock = $sourceManifest.shareChatDatabaseWithStock
+  portableElectronProfile = $sourceManifest.portableElectronProfile
 }
 $manifestJson = $manifest | ConvertTo-Json -Depth 20
 Set-Content -LiteralPath $manifestPath -Value $manifestJson -Encoding UTF8
@@ -560,6 +593,10 @@ try {
     throw "Bundle manifest missing: $manifestPath"
   }
   $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+  if ($manifest.portableElectronProfile -isnot [bool]) {
+    throw "Bundle manifest portableElectronProfile must be true or false."
+  }
+  $portableElectronProfile = [bool]$manifest.portableElectronProfile
   $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
   $bundleDataRoot = Resolve-BundleDataRoot -Manifest $manifest -LocalAppData $localAppData
   $bundleBase = Join-Path $bundleDataRoot "bundled-apps"
@@ -641,7 +678,19 @@ try {
   $appDir = Join-Path $targetRoot "app"
   $resourcesDir = Join-Path $appDir "resources"
   $patchedCodexHome = Join-Path $profileRoot "codex-home"
-  $electronUserDataPath = Join-Path $profileRoot "electron-user-data"
+  $portableElectronUserDataPath = Join-Path $profileRoot "electron-user-data"
+  $stableElectronProfileRoot = Join-Path $localAppData "CodexPatchStudioCurrent"
+  $stableElectronUserDataPath = Join-Path $stableElectronProfileRoot "electron-user-data"
+  $electronUserDataPath = if ($portableElectronProfile) {
+    $portableElectronUserDataPath
+  } else {
+    $stableElectronUserDataPath
+  }
+  $electronProfileMode = if ($portableElectronProfile) {
+    "isolated-per-bundle"
+  } else {
+    "stable-local-app-data"
+  }
   $isolatedSqliteHome = Join-Path $profileRoot "chat-database"
   New-Item `
     -ItemType Directory `
@@ -669,6 +718,8 @@ try {
     bundleName = [string]$manifest.bundleName
     bundleDataRoot = $bundleDataRoot
     profileRoot = $profileRoot
+    portableElectronProfile = $portableElectronProfile
+    electronProfileMode = $electronProfileMode
     sourcePackageDirName = [string]$manifest.sourcePackageDirName
     sourceMode = "bundled-snapshot"
     sourceVersion = [string]$manifest.sourceVersion
@@ -734,7 +785,7 @@ try {
   if (-not (Test-Path -LiteralPath $powershellExe)) {
     $powershellExe = "powershell.exe"
   }
-  Write-BundleLog "Starting bundled patched Codex from $targetRoot with CODEX_HOME=$patchedCodexHome, Electron profile=$electronUserDataPath, SQLite home=$sqliteHome, share stock chat DB=$shareChatDatabaseWithStock"
+  Write-BundleLog "Starting bundled patched Codex from $targetRoot with CODEX_HOME=$patchedCodexHome, Electron profile mode=$electronProfileMode, Electron profile=$electronUserDataPath, SQLite home=$sqliteHome, share stock chat DB=$shareChatDatabaseWithStock"
   Start-Process `
     -FilePath $powershellExe `
     -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launchScript`"" `
@@ -792,8 +843,9 @@ $result = [ordered]@{
   sourceVersion = $version
   sourceDesktopExecutableName = Split-Path -Leaf $sourceCodexExe
   shareChatDatabaseWithStock = $shareChatDatabaseWithStock
+  portableElectronProfile = $portableElectronProfileEnabled
   sfxMode = "7zip"
-  profileMode = "isolated-per-bundle"
+  profileMode = if ($portableElectronProfileEnabled) { "isolated-per-bundle" } else { "stable-local-app-data" }
 }
 
 if (-not $KeepWork) {

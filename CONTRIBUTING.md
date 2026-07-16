@@ -4,13 +4,21 @@ Codex Patch Studio accepts source-only framework changes, compatibility adapters
 
 ## Start Isolated
 
-Create a dedicated branch and worktree from a clean committed `main`:
+Use the executable workflow from a clean committed baseline:
 
 ```powershell
-git worktree add ..\codex-patch-studio-<slug> -b codex/<type>-<slug> main
+node scripts\feature-development-workflow.cjs start `
+  --mode contribution `
+  --feature <publisher>.<slug> `
+  --slug <slug> `
+  --codex-version <installed-version> `
+  --source-asar-sha256 <64-hex-sha256> `
+  --source-cli-sha256 <64-hex-sha256>
 ```
 
-Do not mix personal modules or local configuration into a contribution branch.
+The command creates `contrib/<slug>` in a dedicated sibling worktree, scaffolds through the feature registry, records the baseline commit and `codexIdentity` (exact Codex version/source-ASAR/source CLI fingerprints) under `.feature-workflows/`, runs the source-only guard, and commits the scaffold checkpoint. It never changes `main`, pushes, or opens a pull request. Do not mix personal modules or local configuration into a contribution branch.
+
+Follow [docs/FEATURE-WORKFLOWS.md](docs/FEATURE-WORKFLOWS.md) for status, milestone checkpoints, local-to-contribution conversion, and explicit publication commands.
 
 ## Source Boundary
 
@@ -27,7 +35,7 @@ Use structural probes, short interoperability markers, hashes, counts, synthetic
 
 Contribution modules live under `features/community`, are disabled by default, and declare `distribution.upstreamArtifacts: "forbidden"`. Follow `docs/FEATURE-DEVELOPMENT.md` and use the `codex-patcher-contribute` repository skill.
 
-Adapters must fail closed when a target is absent or ambiguous. All paths remain inside the temporary extraction root. Unpacked and packed verification are required.
+Adapters must fail closed when a target is absent or ambiguous. All paths remain inside the temporary extraction root. First-patch checkpointing runs module tests. Packed verification requires a committed structured patch-manifest evidence JSON tied to the feature, exact version, and source-ASAR fingerprint; runtime/UI requires structured evidence or an explicit N/A reason; docs checkpointing validates the module README.
 
 ## Required Checks
 
@@ -42,4 +50,11 @@ Run `npm run test:live` for patch-output changes. Run runtime and UI tests for r
 
 ## Pull Requests
 
-Open a draft pull request first. Describe compatibility scope, implementation boundary, rollback, source provenance, and validation evidence. Do not upload generated application artifacts. A change is ready for review only after required checks pass.
+After all required checkpoint evidence is committed and `status` reports `readyForReview: true`, publish only when explicitly requested:
+
+```powershell
+node scripts\feature-development-workflow.cjs push --remote origin
+node scripts\feature-development-workflow.cjs pr --base main
+```
+
+`push` and `pr` reject local workflows and reject incomplete/missing-evidence milestones. `pr` requires an already-pushed upstream and opens a draft; it does not push implicitly. Its generated body includes compatibility fingerprints, evidence hashes/results, declared permissions/ports, tests, and checkpoint commits. Publication scans every blob introduced since baseline, including deleted or renamed historical content, for artifacts, copied/extracted Codex source, private paths, private keys, and secrets. Do not upload generated application artifacts. Use `pr --ready` only after required checks pass and workflow status reports `readyForReview: true`.

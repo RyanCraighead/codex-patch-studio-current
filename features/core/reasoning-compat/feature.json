@@ -5,11 +5,34 @@
   "description": "Normalizes provider reasoning summaries and renderer fallbacks.",
   "version": "1.0.0",
   "kind": "core",
-  "implementation": "builtin",
+  "implementation": "module",
   "enabledByDefault": true,
   "dependencies": [],
   "conflicts": [],
-  "permissions": ["patch:asar"],
-  "verification": [],
+  "supports": { "codexVersions": ["26.707.x"] },
+  "structuralAnchors": [
+    {
+      "id": "reasoning-summary-array-conversion",
+      "path": "webview/assets/app-server-manager-signals-*.js",
+      "includes": "let[t,...n]=e??[];return!t||n.length===0",
+      "cardinality": { "exact": 1 }
+    }
+  ],
+  "runtime": { "permissions": ["patch:asar"], "localPorts": [] },
+  "native": { "settings": [], "sidebar": [] },
+  "verification": [
+    {
+      "id": "module-receipt",
+      "path": "codex-patch-studio/features/core.reasoning-compat.json",
+      "includes": "core.reasoning-compat",
+      "cardinality": { "exact": 1 }
+    },
+    {
+      "id": "reasoning-object-normalizer",
+      "path": "webview/assets/app-server-manager-signals-*.js",
+      "includes": "let r=(e??[]).map",
+      "cardinality": { "exact": 1 }
+    }
+  ],
   "distribution": { "upstreamArtifacts": "forbidden" }
 }

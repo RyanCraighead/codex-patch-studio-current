@@ -5,6 +5,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const root = path.resolve(__dirname, "..");
+const { findEmbeddedUpstreamAnchors } = require("../scripts/check-source-only.cjs");
 
 function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -63,18 +64,25 @@ test("source-only guard rejects distributable Codex artifacts and copied anchors
   assert.equal(report.ok, true);
 });
 
+test("source-only guard catches renamed copied minified anchors but permits authored replacements", () => {
+  const copied = `const harmlessName = "${"x".repeat(320)}";\nreplaceExactly(source, harmlessName, "authored", "test");`;
+  assert.equal(findEmbeddedUpstreamAnchors(copied).length, 1);
+  const authored = `const payload = "${"x".repeat(320)}";\nreplaceExactly(source, "short-anchor", payload, "test");`;
+  assert.equal(findEmbeddedUpstreamAnchors(authored).length, 0);
+});
+
 test("current update workflow is one-shot and preserves the verified clone", () => {
   const builder = read("scripts/build-patched-codex-app.cjs");
   const ensure = read("scripts/ensure-current-codex-patch.ps1");
   const launcher = read("scripts/launch-patched-codex.ps1");
-  const patcherUi = read("native-patches/codex-native-patcher-settings.js");
+  const patcherUi = read("features/core/patcher-ui/payload/codex-native-patcher-settings.js");
   const server = read("codex-viewer/server.cjs");
 
   assert.match(builder, /Every build gets a new immutable destination/);
   assert.match(builder, /buildNonce/);
   assert.match(ensure, /Global\\CodexPatchStudioCurrentBuild/);
   assert.match(ensure, /Test-ConfiguredPatchedCodexRunning/);
-  assert.match(launcher, /Resolve-UpdatePolicy/);
+  assert.match(launcher, /Resolve-CodexUpdatePolicy/);
   assert.match(launcher, /Show-CodexUpdatePrompt/);
   assert.match(patcherUi, /state\.updatePolicy !== "off"/);
   assert.match(patcherUi, /Checks are one-shot at launch/);
@@ -89,11 +97,19 @@ test("feature registry and authoring skills remain installed", () => {
   assert.match(read(".agents/skills/codex-patcher-contribute/SKILL.md"), /source-only/);
 });
 
+test("the default test command includes feature-local module tests", () => {
+  const packageJson = JSON.parse(read("package.json"));
+  const runner = read("scripts/run-tests.cjs");
+  assert.equal(packageJson.scripts.test, "node scripts/run-tests.cjs");
+  assert.match(runner, /path\.join\(rootDir, "features"\)/);
+  assert.match(runner, /entry\.name\.endsWith\("\.test\.cjs"\)/);
+});
+
 test("all native feature payloads remain present", () => {
-  const provider = read("native-patches/codex-native-provider-settings.js");
-  const orchestrator = read("native-patches/codex-native-orchestrator.js");
-  const imports = read("native-patches/codex-native-import-settings.js");
-  const patcher = read("native-patches/codex-native-patcher-settings.js");
+  const provider = read("features/core/provider-suite/payload/codex-native-provider-settings.js");
+  const orchestrator = read("features/core/orchestrations/payload/codex-native-orchestrator.js");
+  const imports = read("features/core/imports/payload/codex-native-import-settings.js");
+  const patcher = read("features/core/patcher-ui/payload/codex-native-patcher-settings.js");
 
   for (const marker of [
     "DeepSeek",
@@ -120,10 +136,10 @@ test("all native feature payloads remain present", () => {
 
 test("native payload JavaScript parses", () => {
   for (const relativePath of [
-    "native-patches/codex-native-provider-settings.js",
-    "native-patches/codex-native-orchestrator.js",
-    "native-patches/codex-native-import-settings.js",
-    "native-patches/codex-native-patcher-settings.js",
+    "features/core/provider-suite/payload/codex-native-provider-settings.js",
+    "features/core/orchestrations/payload/codex-native-orchestrator.js",
+    "features/core/imports/payload/codex-native-import-settings.js",
+    "features/core/patcher-ui/payload/codex-native-patcher-settings.js",
     "scripts/build-patched-codex-app.cjs",
     "scripts/codex-responses-chat-proxy.cjs",
     "scripts/export-augment-webview-state.cjs",

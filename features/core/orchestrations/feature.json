@@ -5,12 +5,42 @@
   "description": "Adds project-independent orchestration chats and project-spawned tasks.",
   "version": "1.0.0",
   "kind": "core",
-  "implementation": "builtin",
+  "implementation": "module",
   "enabledByDefault": true,
   "legacyFeatureIds": ["nativeOrchestrator"],
   "dependencies": ["core.settings-shell"],
   "conflicts": [],
-  "permissions": ["patch:asar", "bridge:loopback"],
-  "verification": [],
+  "supports": { "codexVersions": ["26.707.x"] },
+  "structuralAnchors": [
+    {
+      "id": "webview-script-insertion-point",
+      "path": "webview/index.html",
+      "includes": "  <meta http-equiv=\"Content-Security-Policy\"",
+      "cardinality": { "exact": 1 }
+    }
+  ],
+  "runtime": { "permissions": ["patch:asar", "bridge:loopback"], "localPorts": [] },
+  "native": {
+    "settings": [
+      { "id": "core.orchestrations.settings", "label": "Orchestrations", "route": "/settings/orchestrations" }
+    ],
+    "sidebar": [
+      { "id": "core.orchestrations.sidebar", "label": "Orchestrations", "route": "/orchestrations" }
+    ]
+  },
+  "verification": [
+    {
+      "id": "module-receipt",
+      "path": "codex-patch-studio/features/core.orchestrations.json",
+      "includes": "core.orchestrations",
+      "cardinality": { "exact": 1 }
+    },
+    {
+      "id": "orchestrator-payload",
+      "path": "webview/assets/codex-native-orchestrator.js",
+      "includes": "window.__codexNativeOrchestrator = {",
+      "cardinality": { "exact": 1 }
+    }
+  ],
   "distribution": { "upstreamArtifacts": "forbidden" }
 }
