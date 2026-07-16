@@ -98,6 +98,17 @@ test("portable package carries version-aware feature modules", () => {
   assert.match(packager, /-Target \(Join-Path \$payloadRoot "features"\)/);
 });
 
+test("portable package preserves patcher config bytes when the override is unchanged", () => {
+  const packager = read("scripts/package-patched-codex-single-exe.ps1");
+
+  assert.match(packager, /\$rewritePatcherConfig = \$false/);
+  assert.match(
+    packager,
+    /elseif \(\$shareProperty\.Value -ne \$shareChatDatabaseWithStock\)/,
+  );
+  assert.match(packager, /if \(\$rewritePatcherConfig\) \{\s*Write-Utf8NoBom/);
+});
+
 test("portable package pins the verified installer SFX module", () => {
   const sfx = fs.readFileSync(path.join(root, "tools", "7z-sfx-as-invoker.sfx"));
   const hash = crypto.createHash("sha256").update(sfx).digest("hex").toUpperCase();

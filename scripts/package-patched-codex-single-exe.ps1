@@ -416,14 +416,19 @@ foreach ($configName in @("patcher.json", "compatibility.json", "update-channel.
 $payloadPatcherConfigPath = Join-Path $payloadConfigDir "patcher.json"
 $payloadPatcherConfig = Get-Content -LiteralPath $payloadPatcherConfigPath -Raw | ConvertFrom-Json
 $shareProperty = $payloadPatcherConfig.PSObject.Properties["shareChatDatabaseWithStock"]
+$rewritePatcherConfig = $false
 if ($null -eq $shareProperty) {
   $payloadPatcherConfig | Add-Member -NotePropertyName "shareChatDatabaseWithStock" -NotePropertyValue $shareChatDatabaseWithStock
-} else {
+  $rewritePatcherConfig = $true
+} elseif ($shareProperty.Value -ne $shareChatDatabaseWithStock) {
   $shareProperty.Value = $shareChatDatabaseWithStock
+  $rewritePatcherConfig = $true
 }
-Write-Utf8NoBom `
-  -Path $payloadPatcherConfigPath `
-  -Value ($payloadPatcherConfig | ConvertTo-Json -Depth 20)
+if ($rewritePatcherConfig) {
+  Write-Utf8NoBom `
+    -Path $payloadPatcherConfigPath `
+    -Value ($payloadPatcherConfig | ConvertTo-Json -Depth 20)
+}
 
 Invoke-RobocopyChecked `
   -Source (Join-Path $RepoRoot "viewer") `
