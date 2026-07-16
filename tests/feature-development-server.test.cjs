@@ -32,6 +32,16 @@ test("native Feature Development settings use a dedicated event-driven settings 
   assert.match(server, /kind: "contribution"/);
   assert.match(server, /featureRoots\.push\(\{ path: featureRoot, kind: "local" \}\)/);
   assert.match(server, /buildFeatures: \{ \.\.\.preview\.options\.features \}/);
+  assert.match(server, /function normalizedSourceProvenance\(value\)/);
+  assert.match(server, /sourceInfoForFeature\(record, gitCache, launcher\?\.sourceProvenance\)/);
+  assert.match(server, /launcher\?\.mode === "bundled-self-extracting"/);
+  assert.match(server, /launcher\?\.sourceMode === "bundled-snapshot"/);
+  assert.match(server, /samePath\(cloneRoot, rootDir\)/);
+  assert.match(server, /bundle-source\.json/);
+  assert.match(server, /\.bundle-complete\.json/);
+  assert.match(server, /String\(bundleSourceManifest\?\.bundleId/);
+  assert.match(server, /bundleSourceManifest\?\.featureModuleApplication/);
+  assert.match(server, /featureModuleApplication/);
   assert.doesNotMatch(server, /const buildFallback = builtEnabled \? "passed"/);
 });
 

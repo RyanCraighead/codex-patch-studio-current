@@ -142,6 +142,12 @@ test("portable payload uses long-path-safe verified extraction", () => {
   assert.match(innerCompression, /if \(-not \$compressionSucceeded\)/);
   assert.match(packager, /extractorSha256/);
   assert.match(packager, /patchedAppAsarSha256/);
+  assert.match(packager, /sourceProvenance = \$sourceProvenance/);
+  assert.match(packager, /sourceProvenance = \$sourceManifest\.sourceProvenance/);
+  assert.match(packager, /sourceProvenance = \$manifest\.sourceProvenance/);
+  assert.match(packager, /featureModuleApplication = \$featureModuleApplication/);
+  assert.match(packager, /featureModuleApplication = \$sourceManifest\.featureModuleApplication/);
+  assert.match(packager, /featureModuleApplication = \$manifest\.featureModuleApplication/);
   assert.match(packager, /packedVerification = \$config\.packedVerification/);
   assert.match(packager, /packedVerification = \$sourceManifest\.packedVerification/);
   assert.match(packager, /packedVerification = \$manifest\.packedVerification/);
@@ -150,9 +156,14 @@ test("portable payload uses long-path-safe verified extraction", () => {
   assert.doesNotMatch(packager, /Expand-Archive/);
   assert.doesNotMatch(packager, /sourceConfigPath\s*=/);
   assert.doesNotMatch(packager, /sourceAppDir\s*=\s*\$sourceAppDir/);
-  assert.match(read("scripts/verify-portable-payload.cjs"), /verificationMode/);
-  assert.match(read("scripts/verify-portable-payload.cjs"), /bundled-self-extracting/);
-  assert.match(read("scripts/verify-portable-payload.cjs"), /patchedAppAsarSha256/);
+  const payloadVerifier = read("scripts/verify-portable-payload.cjs");
+  assert.match(payloadVerifier, /verificationMode/);
+  assert.match(payloadVerifier, /bundled-self-extracting/);
+  assert.match(payloadVerifier, /patchedAppAsarSha256/);
+  assert.match(payloadVerifier, /assertSourceProvenance\(sourceManifest\.sourceProvenance\)/);
+  assert.match(payloadVerifier, /assertFeatureEvidence\(sourceManifest\)/);
+  assert.match(payloadVerifier, /runtimeLauncher\.sourceProvenance/);
+  assert.match(payloadVerifier, /runtimeLauncher\.featureModuleApplication/);
   assert.match(read("scripts/verify-runtime-services.cjs"), /CODEX_PATCHED_LAUNCHER_CONFIG/);
 });
 

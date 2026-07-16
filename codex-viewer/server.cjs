@@ -1534,16 +1534,36 @@ function sanitizedRepositorySource(value, fallback) {
   }
 }
 
-async function sourceInfoForFeature(record, cache) {
+function normalizedSourceProvenance(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const rawRepository = String(value.repository || "").trim();
+  const repository = sanitizedRepositorySource(rawRepository, "");
+  const remoteRepository =
+    (/^[a-z][a-z0-9+.-]*:\/\//i.test(repository) && !/^file:/i.test(repository)) ||
+    /^[^@\s/:]+@[^\s/:]+:[^\s]+$/.test(repository);
+  const commit = String(value.commit || "").trim().toLowerCase();
+  if (!remoteRepository || path.isAbsolute(repository) || !/^[a-f0-9]{40,64}$/.test(commit)) return null;
+  const branch = value.branch == null ? null : String(value.branch).trim();
+  if (branch && (branch.length > 256 || /[\u0000-\u001f]/.test(branch))) return null;
+  return {
+    repository,
+    commit,
+    branch: branch || null,
+    dirty: typeof value.dirty === "boolean" ? value.dirty : null,
+  };
+}
+
+async function sourceInfoForFeature(record, cache, fallbackProvenance = null) {
   const cachedRoot = [...cache.keys()].find((candidate) => isPathInside(candidate, record.rootPath));
   const candidateRoot = cachedRoot || (await runGitText(record.rootPath, ["rev-parse", "--show-toplevel"]));
   const gitRoot = candidateRoot && isPathInside(candidateRoot, record.rootPath) ? path.resolve(candidateRoot) : "";
   if (!gitRoot) {
+    const provenance = normalizedSourceProvenance(fallbackProvenance);
     return {
-      repository: record.rootPath,
-      commit: null,
-      branch: null,
-      dirty: null,
+      repository: provenance?.repository || record.rootPath,
+      commit: provenance?.commit || null,
+      branch: provenance?.branch || null,
+      dirty: provenance?.dirty ?? null,
       worktree: record.rootPath,
       modulePath: record.rootPath,
     };
@@ -1615,20 +1635,6 @@ function featureEvidenceDetail(evidence, fallback) {
 function verifiedPatchManifest(launcher) {
   const cloneRoot = String(launcher?.cloneRoot || "").trim();
   if (!cloneRoot || !path.isAbsolute(cloneRoot)) return null;
-  const configuredOutputRoot = path.resolve(defaultPatchOptions().outputRoot);
-  const launcherOutputRoot = expandEnvironmentPath(launcher?.outputRoot);
-  const approvedOutputRoots = [configuredOutputRoot];
-  if (launcherOutputRoot && path.isAbsolute(launcherOutputRoot)) {
-    approvedOutputRoots.push(path.resolve(launcherOutputRoot));
-  }
-  if (!approvedOutputRoots.some((outputRoot) => isPathInside(outputRoot, cloneRoot))) return null;
-
-  const launcherCodexExe = String(launcher?.codexExe || "").trim();
-  if (!launcherCodexExe || !path.isAbsolute(launcherCodexExe) || !isPathInside(cloneRoot, launcherCodexExe)) return null;
-  if (!statSafe(launcherCodexExe)?.isFile()) return null;
-
-  const manifest = readJsonBoundedSafe(path.join(cloneRoot, "patch-manifest.json"));
-  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return null;
   const samePath = (left, right) => {
     if (!left || !right) return false;
     const normalizedLeft = path.resolve(String(left));
@@ -1637,9 +1643,41 @@ function verifiedPatchManifest(launcher) {
       ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
       : normalizedLeft === normalizedRight;
   };
+  const bundleSourceManifest = readJsonBoundedSafe(path.join(rootDir, "bundle-source.json"));
+  const bundleCompleteMarker = readJsonBoundedSafe(path.join(rootDir, ".bundle-complete.json"));
+  const bundleId = String(launcher?.bundleId || "").trim();
+  const bundledSnapshot =
+    launcher?.mode === "bundled-self-extracting" &&
+    launcher?.sourceMode === "bundled-snapshot" &&
+    samePath(cloneRoot, rootDir) &&
+    Boolean(bundleId) &&
+    String(bundleSourceManifest?.bundleId || "") === bundleId &&
+    String(bundleCompleteMarker?.bundleId || "") === bundleId;
+  const configuredOutputRoot = path.resolve(defaultPatchOptions().outputRoot);
+  const launcherOutputRoot = expandEnvironmentPath(launcher?.outputRoot);
+  const approvedOutputRoots = [configuredOutputRoot];
+  if (launcherOutputRoot && path.isAbsolute(launcherOutputRoot)) {
+    approvedOutputRoots.push(path.resolve(launcherOutputRoot));
+  }
+  if (!bundledSnapshot && !approvedOutputRoots.some((outputRoot) => isPathInside(outputRoot, cloneRoot))) return null;
+
+  const launcherCodexExe = String(launcher?.codexExe || "").trim();
+  if (!launcherCodexExe || !path.isAbsolute(launcherCodexExe) || !isPathInside(cloneRoot, launcherCodexExe)) return null;
+  if (!statSafe(launcherCodexExe)?.isFile()) return null;
+
+  const manifest = readJsonBoundedSafe(path.join(cloneRoot, "patch-manifest.json"));
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return null;
   if (!samePath(manifest.cloneRoot, cloneRoot) || !samePath(manifest.codexExe, launcherCodexExe)) return null;
 
-  const matchingFields = ["sourceVersion", "sourceAsarSha256", "sourceAppServerCliSha256", "buildIdentity"];
+  const matchingFields = [
+    "mode",
+    "sourceMode",
+    "sourceVersion",
+    "sourceAsarSha256",
+    "patchedAppAsarSha256",
+    "sourceAppServerCliSha256",
+    "buildIdentity",
+  ];
   if (
     matchingFields.some(
       (field) => launcher?.[field] != null && String(manifest?.[field] || "") !== String(launcher[field])
@@ -1649,6 +1687,21 @@ function verifiedPatchManifest(launcher) {
   }
   const launcherPatcherSha = String(launcher?.patcherSource?.sha256 || "").trim();
   if (launcherPatcherSha && String(manifest?.patcherSource?.sha256 || "") !== launcherPatcherSha) return null;
+  if (bundledSnapshot) {
+    const launcherProvenance = normalizedSourceProvenance(launcher?.sourceProvenance);
+    const manifestProvenance = normalizedSourceProvenance(manifest?.sourceProvenance);
+    const bundledProvenance = normalizedSourceProvenance(bundleSourceManifest?.sourceProvenance);
+    if (
+      !launcherProvenance ||
+      JSON.stringify(launcherProvenance) !== JSON.stringify(manifestProvenance) ||
+      JSON.stringify(launcherProvenance) !== JSON.stringify(bundledProvenance) ||
+      String(bundleSourceManifest?.patcherSource?.sha256 || "") !== launcherPatcherSha ||
+      JSON.stringify(bundleSourceManifest?.featureModuleApplication) !==
+        JSON.stringify(manifest?.featureModuleApplication)
+    ) {
+      return null;
+    }
+  }
   return manifest;
 }
 
@@ -1700,7 +1753,9 @@ async function featureDevelopmentStatus() {
     );
     const buildDefaults = defaultPatchOptions().features;
     const gitCache = new Map();
-    const sources = await Promise.all(catalog.records.map((record) => sourceInfoForFeature(record, gitCache)));
+    const sources = await Promise.all(
+      catalog.records.map((record) => sourceInfoForFeature(record, gitCache, launcher?.sourceProvenance))
+    );
     const modules = catalog.records.map((record, index) => {
       const legacyFeatureIds = Array.isArray(record.manifest.legacyFeatureIds) ? record.manifest.legacyFeatureIds : [];
       const configuredEnabled = Object.prototype.hasOwnProperty.call(configured, record.id)

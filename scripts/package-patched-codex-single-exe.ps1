@@ -149,6 +149,68 @@ function Get-Sha256Hex {
   }
 }
 
+function Test-SameResolvedPath {
+  param(
+    [string]$Left,
+    [string]$Right
+  )
+  if (-not $Left -or -not $Right) {
+    return $false
+  }
+  return [string]::Equals(
+    [System.IO.Path]::GetFullPath($Left).TrimEnd('\', '/'),
+    [System.IO.Path]::GetFullPath($Right).TrimEnd('\', '/'),
+    [System.StringComparison]::OrdinalIgnoreCase
+  )
+}
+
+function Get-SafeSourceProvenance {
+  $commit = (@(& git -C $RepoRoot rev-parse HEAD 2>$null) -join "`n").Trim()
+  if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[a-fA-F0-9]{40,64}$') {
+    throw "Could not resolve a valid Git commit for portable source provenance. Package from a Git checkout."
+  }
+
+  $remote = (@(& git -C $RepoRoot remote get-url origin 2>$null) -join "`n").Trim()
+  if ($LASTEXITCODE -ne 0 -or -not $remote) {
+    throw "Could not resolve the origin remote for portable source provenance."
+  }
+  if ([System.IO.Path]::IsPathRooted($remote) -or $remote -match '^(?:file:|\\\\|\.{1,2}[\\/])') {
+    throw "The origin remote is a local filesystem path and cannot be embedded in a portable bundle."
+  }
+
+  $safeRemote = $remote
+  $parsedRemote = $null
+  if ([System.Uri]::TryCreate($remote, [System.UriKind]::Absolute, [ref]$parsedRemote)) {
+    if ($parsedRemote.Scheme -eq 'file') {
+      throw "A file:// origin remote cannot be embedded in a portable bundle."
+    }
+    $builder = [System.UriBuilder]::new($parsedRemote)
+    $builder.UserName = ""
+    $builder.Password = ""
+    $builder.Query = ""
+    $builder.Fragment = ""
+    $safeRemote = $builder.Uri.AbsoluteUri.TrimEnd('/')
+  } elseif ($remote -notmatch '^[^@\s/:]+@[^\s/:]+:[^\s]+$') {
+    throw "The origin remote is not a safe HTTP(S), SSH, or Git remote URL."
+  }
+
+  $branch = (@(& git -C $RepoRoot branch --show-current 2>$null) -join "`n").Trim()
+  if ($LASTEXITCODE -ne 0) {
+    $branch = ""
+  }
+  $dirtyOutput = @(& git -C $RepoRoot status --porcelain --untracked-files=normal 2>$null)
+  if ($LASTEXITCODE -ne 0) {
+    throw "Could not determine source worktree status for portable provenance."
+  }
+
+  return [ordered]@{
+    repository = $safeRemote
+    commit = $commit.ToLowerInvariant()
+    branch = if ($branch) { $branch } else { $null }
+    dirty = ($dirtyOutput.Count -gt 0)
+  }
+}
+
 function Find-SevenZipTool {
   $candidates = @(
     (Join-Path $env:ProgramFiles "7-Zip\7z.exe"),
@@ -266,6 +328,31 @@ $sourceAppAsar = Join-Path $sourceAppDir "resources\app.asar"
 if (-not (Test-Path -LiteralPath $sourceAppAsar)) {
   throw "Patched app.asar not found: $sourceAppAsar"
 }
+
+$sourceCloneRoot = [string]$config.cloneRoot
+if (-not $sourceCloneRoot -or -not (Test-SameResolvedPath -Left $sourceCloneRoot -Right (Split-Path -Parent $sourceAppDir))) {
+  throw "Launcher cloneRoot does not match the patched app directory being packaged."
+}
+$sourcePatchManifestPath = Join-Path $sourceCloneRoot "patch-manifest.json"
+if (-not (Test-Path -LiteralPath $sourcePatchManifestPath -PathType Leaf)) {
+  throw "Verified source patch manifest not found: $sourcePatchManifestPath"
+}
+$sourcePatchManifest = Get-Content -LiteralPath $sourcePatchManifestPath -Raw | ConvertFrom-Json
+if (
+  -not (Test-SameResolvedPath -Left ([string]$sourcePatchManifest.cloneRoot) -Right $sourceCloneRoot) -or
+  -not (Test-SameResolvedPath -Left ([string]$sourcePatchManifest.codexExe) -Right $sourceCodexExe) -or
+  ([string]$sourcePatchManifest.sourceVersion -ne [string]$config.sourceVersion) -or
+  ([string]$sourcePatchManifest.sourceAsarSha256 -ne [string]$config.sourceAsarSha256) -or
+  ([string]$sourcePatchManifest.sourceAppServerCliSha256 -ne [string]$config.sourceAppServerCliSha256) -or
+  ([string]$sourcePatchManifest.patcherSource.sha256 -ne [string]$config.patcherSource.sha256)
+) {
+  throw "Source patch manifest identity does not match the promoted launcher configuration."
+}
+$featureModuleApplication = @($sourcePatchManifest.featureModuleApplication)
+if (@($config.featureModules | Where-Object { $_.enabled -eq $true }).Count -gt 0 -and $featureModuleApplication.Count -eq 0) {
+  throw "Source patch manifest is missing per-feature application evidence."
+}
+$sourceProvenance = Get-SafeSourceProvenance
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
@@ -487,9 +574,11 @@ $sourceManifest = [ordered]@{
   sourceDesktopExeSha256 = [string]$config.sourceDesktopExeSha256
   sourceAppServerCliSha256 = [string]$config.sourceAppServerCliSha256
   patcherSource = $patcherSource
+  sourceProvenance = $sourceProvenance
   limit = if ($config.limit) { [int]$config.limit } else { 1000 }
   features = $config.features
   featureModules = $config.featureModules
+  featureModuleApplication = $featureModuleApplication
   packedVerification = $config.packedVerification
   catalogShim = $config.catalogShim
   shareChatDatabaseWithStock = $shareChatDatabaseWithStock
@@ -594,9 +683,11 @@ $manifest = [ordered]@{
   sourceDesktopExeSha256 = $sourceManifest.sourceDesktopExeSha256
   sourceAppServerCliSha256 = $sourceManifest.sourceAppServerCliSha256
   patcherSource = $sourceManifest.patcherSource
+  sourceProvenance = $sourceManifest.sourceProvenance
   limit = $sourceManifest.limit
   features = $sourceManifest.features
   featureModules = $sourceManifest.featureModules
+  featureModuleApplication = $sourceManifest.featureModuleApplication
   packedVerification = $sourceManifest.packedVerification
   catalogShim = $sourceManifest.catalogShim
   shareChatDatabaseWithStock = $sourceManifest.shareChatDatabaseWithStock
@@ -842,6 +933,7 @@ try {
     limit = [int]$manifest.limit
     features = $manifest.features
     featureModules = $manifest.featureModules
+    featureModuleApplication = $manifest.featureModuleApplication
     packedVerification = $manifest.packedVerification
     builtAt = [string]$manifest.packagedAt
     bundleId = [string]$manifest.bundleId
@@ -859,6 +951,7 @@ try {
     sourceDesktopExeSha256 = [string]$manifest.sourceDesktopExeSha256
     sourceAppServerCliSha256 = [string]$manifest.sourceAppServerCliSha256
     patcherSource = $manifest.patcherSource
+    sourceProvenance = $manifest.sourceProvenance
     cloneRoot = $targetRoot
     appDir = $appDir
     resourcesDir = $resourcesDir

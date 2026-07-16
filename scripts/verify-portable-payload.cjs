@@ -54,6 +54,56 @@ function filesUnder(root) {
   return files;
 }
 
+function assertSourceProvenance(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Portable source manifest is missing sourceProvenance");
+  }
+  const repository = String(value.repository || "").trim();
+  let safeRepository = false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(repository)) {
+    const parsed = new URL(repository);
+    safeRepository =
+      ["https:", "http:", "ssh:", "git:"].includes(parsed.protocol) &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.search &&
+      !parsed.hash;
+  } else {
+    safeRepository = /^[^@\s/:]+@[^\s/:]+:[^\s]+$/.test(repository);
+  }
+  if (!safeRepository || path.isAbsolute(repository) || /^file:/i.test(repository)) {
+    throw new Error("Portable source provenance repository is not a sanitized remote URL");
+  }
+  if (!/^[a-f0-9]{40,64}$/i.test(String(value.commit || ""))) {
+    throw new Error("Portable source provenance commit is invalid");
+  }
+  if (value.branch != null && (typeof value.branch !== "string" || value.branch.length > 256 || /[\u0000-\u001f]/.test(value.branch))) {
+    throw new Error("Portable source provenance branch is invalid");
+  }
+  if (typeof value.dirty !== "boolean") {
+    throw new Error("Portable source provenance dirty flag must be true or false");
+  }
+}
+
+function assertFeatureEvidence(manifest) {
+  if (!Array.isArray(manifest.featureModules) || !Array.isArray(manifest.featureModuleApplication)) {
+    throw new Error("Portable source manifest is missing feature module build evidence");
+  }
+  const appliedIds = new Set();
+  for (const evidence of manifest.featureModuleApplication) {
+    const id = String(evidence?.id || "");
+    if (!/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(id) || appliedIds.has(id)) {
+      throw new Error(`Portable source manifest has invalid or duplicate feature evidence: ${id || "<missing>"}`);
+    }
+    appliedIds.add(id);
+  }
+  for (const feature of manifest.featureModules.filter((item) => item?.enabled === true)) {
+    if (!appliedIds.has(String(feature.id || ""))) {
+      throw new Error(`Portable source manifest is missing application evidence for enabled feature: ${feature.id}`);
+    }
+  }
+}
+
 function scanFileForSecrets(filePath, secrets) {
   const handle = fs.openSync(filePath, "r");
   const maxSecretLength = Math.max(...secrets.map((entry) => entry.value.length));
@@ -114,6 +164,8 @@ const sourceManifest = JSON.parse(sourceManifestText);
 if (typeof sourceManifest.portableElectronProfile !== "boolean") {
   throw new Error("Portable source manifest portableElectronProfile must be true or false");
 }
+assertSourceProvenance(sourceManifest.sourceProvenance);
+assertFeatureEvidence(sourceManifest);
 if (!/^[a-f0-9]{64}$/i.test(String(sourceManifest.patchedAppAsarSha256 || ""))) {
   throw new Error("Portable source manifest is missing patchedAppAsarSha256");
 }
@@ -173,6 +225,12 @@ if (runtimeMode) {
   }
   if (runtimeLauncher.patchedAppAsarSha256 !== sourceManifest.patchedAppAsarSha256) {
     throw new Error("Initialized portable runtime launcher changed the patched app.asar hash.");
+  }
+  if (JSON.stringify(runtimeLauncher.sourceProvenance) !== JSON.stringify(sourceManifest.sourceProvenance)) {
+    throw new Error("Initialized portable runtime launcher changed the source provenance.");
+  }
+  if (JSON.stringify(runtimeLauncher.featureModuleApplication) !== JSON.stringify(sourceManifest.featureModuleApplication)) {
+    throw new Error("Initialized portable runtime lost per-feature application evidence.");
   }
   for (const key of requiredVerification) {
     if (runtimeLauncher.packedVerification?.[key] !== true) {
@@ -240,6 +298,8 @@ process.stdout.write(`${JSON.stringify({
   bundledSqliteVersion: sqliteCheck.stdout.trim().split(/\s+/)[0],
   installerSfxSha256,
   patchedAppAsarSha256,
+  sourceRepository: sourceManifest.sourceProvenance.repository,
+  sourceCommit: sourceManifest.sourceProvenance.commit,
   scannedProviderSecretCount: secrets.length,
   privateRuntimeFilesPresent: false,
   generatedLauncherConfigPresent: fs.existsSync(runtimeLauncherPath),
