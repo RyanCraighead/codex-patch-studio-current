@@ -130,21 +130,7 @@ function Show-CodexUpdatePrompt {
   param([object]$State)
 
   Add-Type -AssemblyName System.Windows.Forms
-  $reasonText = if ($State.codexUpdateAvailable) {
-    "A new or changed Codex installation was detected."
-  } elseif ($State.patcherUpdateAvailable) {
-    "The patch framework has changed since this clone was built."
-  } else {
-    "This patched clone needs to be rebuilt."
-  }
-  $detail = @(
-    $reasonText,
-    "",
-    "Installed Codex: $($State.installedVersion)",
-    "Patched Codex: $($State.patchedVersion)",
-    "",
-    "Rebuild now? The patcher will build a separate local clone, run structural and packed verification, and switch to it only if validation succeeds."
-  ) -join "`r`n"
+  $detail = Get-CodexUpdatePromptText -State $State
   $result = [System.Windows.Forms.MessageBox]::Show(
     $detail,
     "Codex Patch Studio update detected",
@@ -161,7 +147,7 @@ function Show-CodexUpdateFailure {
   try {
     Add-Type -AssemblyName System.Windows.Forms
     [System.Windows.Forms.MessageBox]::Show(
-      "The updated Codex build could not be patched safely.`r`n`r`n$Message`r`n`r`nThe installed Codex app was not modified. Open the Patcher settings or logs for details.",
+      (Get-CodexUpdateFailureText -Message $Message),
       "Codex Patch Studio update failed",
       [System.Windows.Forms.MessageBoxButtons]::OK,
       [System.Windows.Forms.MessageBoxIcon]::Error

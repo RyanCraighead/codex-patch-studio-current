@@ -35,7 +35,26 @@ $selections=[pscustomobject]@{
   prompted=(Select-CodexUpdatePolicy -LocalConfig @{} -Prompt { 'auto' })
   nonInteractive=(Select-CodexUpdatePolicy -LocalConfig @{} -NonInteractive)
 }
-[pscustomobject]@{plans=$plans;selections=$selections}|ConvertTo-Json -Depth 8 -Compress
+$promptState=[pscustomobject]@{
+  codexUpdateAvailable=$true
+  patcherUpdateAvailable=$false
+  installedVersion='26.800.1.0'
+  patchedVersion='26.707.9981.0'
+  reasons=@('installed-version-changed','source-asar-changed')
+}
+$frameworkState=[pscustomobject]@{
+  codexUpdateAvailable=$false
+  patcherUpdateAvailable=$true
+  installedVersion='26.707.9981.0'
+  patchedVersion='26.707.9981.0'
+  reasons=@('patcher-source-changed')
+}
+$messages=[pscustomobject]@{
+  codex=(Get-CodexUpdatePromptText -State $promptState)
+  framework=(Get-CodexUpdatePromptText -State $frameworkState)
+  failure=(Get-CodexUpdateFailureText -Message 'packed verification failed')
+}
+[pscustomobject]@{plans=$plans;selections=$selections;messages=$messages}|ConvertTo-Json -Depth 8 -Compress
 `,
     "utf8"
   );
@@ -60,6 +79,16 @@ $selections=[pscustomobject]@{
     prompted: "auto",
     nonInteractive: "notify",
   });
+  assert.match(payload.messages.codex, /A new or changed Codex installation was detected/);
+  assert.match(payload.messages.codex, /Installed Codex: 26\.800\.1\.0/);
+  assert.match(payload.messages.codex, /Patched Codex: 26\.707\.9981\.0/);
+  assert.match(payload.messages.codex, /installed-version-changed, source-asar-changed/);
+  assert.match(payload.messages.codex, /separate local clone/);
+  assert.match(payload.messages.codex, /switch to it only if validation succeeds/);
+  assert.match(payload.messages.framework, /patch framework has changed/);
+  assert.match(payload.messages.failure, /could not be patched safely/);
+  assert.match(payload.messages.failure, /packed verification failed/);
+  assert.match(payload.messages.failure, /installed Codex app was not modified/);
 });
 
 test("failed candidate verification cannot replace the last-known-good launcher config", () => {
@@ -88,6 +117,8 @@ test("the real setup, launcher, and builder use the tested update lifecycle", ()
   assert.match(setup, /Select-CodexUpdatePolicy/);
   assert.match(launcher, /Get-CodexUpdatePlan/);
   assert.match(launcher, /Show-CodexUpdatePrompt/);
+  assert.match(launcher, /Get-CodexUpdatePromptText/);
+  assert.match(launcher, /Get-CodexUpdateFailureText/);
   assert.match(launcher, /CODEX_ALLOW_STALE_PATCHED_LAUNCH/);
   assert.match(builder, /promoteVerifiedJson\(launcherConfigPath/);
   assert.ok(builder.indexOf("const packedVerification = verifyPackedAsar") < builder.indexOf("promoteVerifiedJson(launcherConfigPath"));

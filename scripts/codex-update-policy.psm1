@@ -64,6 +64,34 @@ function Get-CodexUpdatePlan {
   }
 }
 
+function Get-CodexUpdatePromptText {
+  param([Parameter(Mandatory = $true)][object]$State)
+
+  $reasonText = if ($State.codexUpdateAvailable) {
+    "A new or changed Codex installation was detected."
+  } elseif ($State.patcherUpdateAvailable) {
+    "The patch framework has changed since this clone was built."
+  } else {
+    "This patched clone needs to be rebuilt."
+  }
+
+  return @(
+    $reasonText,
+    "",
+    "Installed Codex: $($State.installedVersion)",
+    "Patched Codex: $($State.patchedVersion)",
+    "Reason: $(@($State.reasons) -join ', ')",
+    "",
+    "Rebuild now? The patcher will build a separate local clone, run structural and packed verification, and switch to it only if validation succeeds."
+  ) -join "`r`n"
+}
+
+function Get-CodexUpdateFailureText {
+  param([Parameter(Mandatory = $true)][string]$Message)
+
+  return "The updated Codex build could not be patched safely.`r`n`r`n$Message`r`n`r`nThe installed Codex app was not modified. Open the Patcher settings or logs for details."
+}
+
 function Select-CodexUpdatePolicy {
   param(
     [string]$RequestedPolicy = "",
@@ -105,4 +133,4 @@ function Select-CodexUpdatePolicy {
   return @("notify", "auto", "off")[$selection]
 }
 
-Export-ModuleMember -Function Resolve-CodexUpdatePolicy, Get-CodexUpdatePlan, Select-CodexUpdatePolicy
+Export-ModuleMember -Function Resolve-CodexUpdatePolicy, Get-CodexUpdatePlan, Get-CodexUpdatePromptText, Get-CodexUpdateFailureText, Select-CodexUpdatePolicy
