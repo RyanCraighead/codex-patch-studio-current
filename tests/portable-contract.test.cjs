@@ -34,6 +34,10 @@ test("portable package carries its runtime dependencies", () => {
   assert.match(packager, /"run-tests\.cjs"/);
   assert.match(packager, /"codex-update-policy\.psm1"/);
   assert.match(packager, /"verify-portable-payload\.cjs"/);
+  assert.match(packager, /"verify-current-patched-build\.cjs"/);
+  assert.match(packager, /"verify-runtime-services\.cjs"/);
+  assert.match(packager, /"verify-current-ui\.cjs"/);
+  assert.match(packager, /"resolve-listening-process\.cjs"/);
   const payloadVerifier = read("scripts/verify-portable-payload.cjs");
   for (const dependency of [
     "codex-update-policy.psm1",
@@ -43,6 +47,10 @@ test("portable package carries its runtime dependencies", () => {
     "run-tests.cjs",
     "check-source-only.cjs",
     "verify-portable-payload.cjs",
+    "verify-current-patched-build.cjs",
+    "verify-runtime-services.cjs",
+    "verify-current-ui.cjs",
+    "resolve-listening-process.cjs",
   ]) {
     assert.match(payloadVerifier, new RegExp(dependency.replaceAll(".", "\\.")));
   }
@@ -93,6 +101,20 @@ test("portable payload uses long-path-safe verified extraction", () => {
   assert.match(read("scripts/verify-portable-payload.cjs"), /verificationMode/);
   assert.match(read("scripts/verify-portable-payload.cjs"), /bundled-self-extracting/);
   assert.match(read("scripts/verify-runtime-services.cjs"), /CODEX_PATCHED_LAUNCHER_CONFIG/);
+});
+
+test("update detection fingerprints the runtime verification contract", () => {
+  const fingerprint = read("scripts/patcher-fingerprint.cjs");
+  for (const dependency of [
+    "codex-update-policy.psm1",
+    "ensure-current-codex-patch.ps1",
+    "verify-current-patched-build.cjs",
+    "verify-runtime-services.cjs",
+    "verify-current-ui.cjs",
+    "resolve-listening-process.cjs",
+  ]) {
+    assert.match(fingerprint, new RegExp(dependency.replaceAll(".", "\\.")));
+  }
 });
 
 test("packager verifies the dormant payload before compression and fails closed", () => {

@@ -70,6 +70,10 @@ required(path.join("scripts", "feature-development-workflow.cjs"));
 required(path.join("scripts", "run-tests.cjs"));
 required(path.join("scripts", "check-source-only.cjs"));
 required(path.join("scripts", "verify-portable-payload.cjs"));
+required(path.join("scripts", "verify-current-patched-build.cjs"));
+required(path.join("scripts", "verify-runtime-services.cjs"));
+required(path.join("scripts", "verify-current-ui.cjs"));
+required(path.join("scripts", "resolve-listening-process.cjs"));
 required(path.join("scripts", "export-augment-webview-state.cjs"));
 required(path.join("features", "core", "provider-suite", "payload", "codex-native-provider-settings.js"));
 
