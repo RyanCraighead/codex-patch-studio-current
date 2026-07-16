@@ -40,8 +40,12 @@ test("runtime verifiers support lazy all-chats mode", () => {
   const uiVerifier = read("scripts/verify-current-ui.cjs");
   assert.match(runtimeVerifier, /waitForCatalogShim/);
   assert.match(runtimeVerifier, /catalogShimEnabled/);
+  assert.match(uiVerifier, /waitForCatalogShim/);
   assert.match(uiVerifier, /codex-all-chats-shim/);
   assert.match(uiVerifier, /catalogShimEnabled/);
+  assert.match(uiVerifier, /runtimeSourceSha256/);
+  assert.match(uiVerifier, /__codexNativeNavigate\('\/'\)/);
+  assert.match(uiVerifier, /Main view remained on a settings route/);
 });
 
 test("Codex rollout indexing is bounded and import health is lightweight", () => {

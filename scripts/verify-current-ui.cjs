@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const fs = require("node:fs");
+const crypto = require("node:crypto");
 const path = require("node:path");
 const WebSocket = require("ws");
 
@@ -12,6 +13,23 @@ const launcherPath = path.resolve(
 const launcher = JSON.parse(fs.readFileSync(launcherPath, "utf8").replace(/^\uFEFF/, ""));
 const outputDir = path.join(root, ".tmp", "ui-smoke");
 fs.mkdirSync(outputDir, { recursive: true });
+
+function sha256(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function sameHash(left, right) {
+  return Boolean(left && right) && String(left).toLowerCase() === String(right).toLowerCase();
+}
+
+function samePath(left, right) {
+  if (!left || !right) return false;
+  const normalizedLeft = path.resolve(String(left));
+  const normalizedRight = path.resolve(String(right));
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
 
 async function delay(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -41,6 +59,39 @@ async function pageTarget() {
     throw new Error(`No Codex page target is exposed by CDP on port ${port}. Relaunch the patched app and retry.`);
   }
   return target;
+}
+
+async function waitForCatalogShim(timeoutMs = 60_000) {
+  const basePort = Number(launcher.catalogShim?.basePort || 47851);
+  const expectedSourceSha256 = sha256(path.join(root, "scripts", "codex-all-chats-shim.cjs"));
+  const expectedUpstreamCli = launcher.catalogShim?.upstreamCli;
+  const expectedCliSha256 = launcher.sourceAppServerCliSha256;
+  const expectedMaxThreads = Number(launcher.catalogShim?.maxThreads || 10000);
+  const deadline = Date.now() + timeoutMs;
+  let health = null;
+  while (Date.now() < deadline) {
+    for (let shimPort = basePort; shimPort < basePort + 50; shimPort += 1) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${shimPort}/health`, {
+          signal: AbortSignal.timeout(1_000),
+        });
+        if (!response.ok) continue;
+        const candidate = await response.json();
+        const matches =
+          candidate.ok === true &&
+          candidate.service === "codex-all-chats-shim" &&
+          sameHash(candidate.runtimeSourceSha256, expectedSourceSha256) &&
+          sameHash(candidate.upstreamCliSha256, expectedCliSha256) &&
+          samePath(candidate.upstreamCli, expectedUpstreamCli) &&
+          Number(candidate.maxThreads) === expectedMaxThreads;
+        if (!matches) continue;
+        health = candidate;
+        if (candidate.expansions >= 1 && candidate.lastCatalogCount >= 1) return candidate;
+      } catch {}
+    }
+    await delay(1_000);
+  }
+  return health;
 }
 
 class CdpClient {
@@ -255,19 +306,18 @@ async function main() {
     if (hydration && hydration.requestedThreadLimit === 1000 && hydration.loadedThreadCount >= 1) break;
     await delay(1_000);
   }
-  while (catalogShimEnabled && Date.now() < hydrationDeadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${Number(launcher.catalogShim?.basePort || 47851)}/health`);
-      if (response.ok) {
-        catalogShim = await response.json();
-        if (catalogShim.ok === true && catalogShim.expansions >= 1 && catalogShim.lastCatalogCount >= 1) break;
-      }
-    } catch {}
-    await delay(1_000);
-  }
+  if (catalogShimEnabled) catalogShim = await waitForCatalogShim();
 
   const results = { target: { title: target.title, url: target.url }, catalogShim, views: {} };
+  const navigationBridgeReady = await client.evaluate(`typeof globalThis.__codexNativeNavigate === 'function'`);
+  if (!navigationBridgeReady) throw new Error("Current Codex navigation bridge did not initialize.");
+  await client.evaluate(`globalThis.__codexNativeNavigate('/')`);
+  await delay(1800);
   results.views.main = await snapshot(client, "01-main");
+  const visibleSettingsRoutes = results.views.main.customHosts.filter((id) => /settings-route$/.test(id));
+  if (visibleSettingsRoutes.length > 0) {
+    throw new Error(`Main view remained on a settings route: ${visibleSettingsRoutes.join(", ")}`);
+  }
   for (const enabled of Object.entries(results.views.main.globals)) {
     if (enabled[0] !== "historyHydration" && !enabled[1]) throw new Error(`Native payload did not initialize: ${enabled[0]}`);
   }
@@ -279,8 +329,6 @@ async function main() {
     throw new Error(`Native 1,000-chat hydration did not report a valid runtime result: ${JSON.stringify(hydration)}`);
   }
 
-  const navigationBridgeReady = await client.evaluate(`typeof globalThis.__codexNativeNavigate === 'function'`);
-  if (!navigationBridgeReady) throw new Error("Current Codex navigation bridge did not initialize.");
   await client.evaluate(`globalThis.__codexNativeNavigate('/settings/providers')`);
   await delay(1800);
   results.views.settings = await snapshot(client, "02-settings");
