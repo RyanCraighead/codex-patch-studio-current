@@ -59,13 +59,24 @@ function Test-PathEqual {
 }
 
 function Test-MatchingHealth {
-  param([object]$Health, [string]$ExpectedHash, [string]$ExpectedHome, [string]$ExpectedSqliteHome)
+  param(
+    [object]$Health,
+    [string]$ExpectedHash,
+    [string]$ExpectedRuntimeSourceHash,
+    [string]$ExpectedUpstreamCli,
+    [string]$ExpectedHome,
+    [string]$ExpectedSqliteHome,
+    [int]$ExpectedMaxThreads
+  )
   return (
     $null -ne $Health -and
     [string]$Health.service -eq "codex-all-chats-shim" -and
     [string]$Health.upstreamCliSha256 -eq $ExpectedHash -and
+    [string]$Health.runtimeSourceSha256 -eq $ExpectedRuntimeSourceHash -and
+    (Test-PathEqual -Left ([string]$Health.upstreamCli) -Right $ExpectedUpstreamCli) -and
     (Test-PathEqual -Left ([string]$Health.codexHome) -Right $ExpectedHome) -and
-    (Test-PathEqual -Left ([string]$Health.sqliteHome) -Right $ExpectedSqliteHome)
+    (Test-PathEqual -Left ([string]$Health.sqliteHome) -Right $ExpectedSqliteHome) -and
+    [int]$Health.maxThreads -eq $ExpectedMaxThreads
   )
 }
 
@@ -122,10 +133,16 @@ if ($BasePort -lt 1 -or $BasePort -gt 65535 -or $PortRange -lt 1 -or ($BasePort 
   throw "Invalid catalog shim port range: $BasePort through $($BasePort + $PortRange - 1)."
 }
 
+$shimScript = Join-Path $RepoRoot "scripts\codex-all-chats-shim.cjs"
+if (-not (Test-Path -LiteralPath $shimScript -PathType Leaf)) {
+  throw "Catalog shim runtime is missing: $shimScript"
+}
+$runtimeSourceHash = Get-Sha256Hex -Path $shimScript
+
 $selectedPort = $null
 for ($port = $BasePort; $port -lt ($BasePort + $PortRange); $port++) {
   $health = Get-Health -Port $port
-  if (Test-MatchingHealth -Health $health -ExpectedHash $expectedHash -ExpectedHome $CodexHome -ExpectedSqliteHome $SqliteHome) {
+  if (Test-MatchingHealth -Health $health -ExpectedHash $expectedHash -ExpectedRuntimeSourceHash $runtimeSourceHash -ExpectedUpstreamCli $upstreamCli -ExpectedHome $CodexHome -ExpectedSqliteHome $SqliteHome -ExpectedMaxThreads $maxThreads) {
     [pscustomobject]@{
       ok = $true
       reused = $true
@@ -138,6 +155,7 @@ for ($port = $BasePort; $port -lt ($BasePort + $PortRange); $port++) {
       sqliteHome = $SqliteHome
       upstreamCli = $upstreamCli
       upstreamCliSha256 = $expectedHash
+      runtimeSourceSha256 = $runtimeSourceHash
       maxThreads = $maxThreads
     } | ConvertTo-Json -Depth 5
     return
@@ -149,11 +167,6 @@ for ($port = $BasePort; $port -lt ($BasePort + $PortRange); $port++) {
 }
 if ($null -eq $selectedPort) {
   throw "No free catalog shim port was found from $BasePort through $($BasePort + $PortRange - 1)."
-}
-
-$shimScript = Join-Path $RepoRoot "scripts\codex-all-chats-shim.cjs"
-if (-not (Test-Path -LiteralPath $shimScript -PathType Leaf)) {
-  throw "Catalog shim runtime is missing: $shimScript"
 }
 $node = if ($env:CODEX_PATCHED_NODE -and (Test-Path -LiteralPath $env:CODEX_PATCHED_NODE -PathType Leaf)) {
   (Resolve-Path -LiteralPath $env:CODEX_PATCHED_NODE).Path
@@ -204,7 +217,7 @@ $deadline = [DateTime]::UtcNow.AddSeconds(20)
 do {
   Start-Sleep -Milliseconds 200
   $health = Get-Health -Port $selectedPort
-  if (Test-MatchingHealth -Health $health -ExpectedHash $expectedHash -ExpectedHome $CodexHome -ExpectedSqliteHome $SqliteHome) {
+  if (Test-MatchingHealth -Health $health -ExpectedHash $expectedHash -ExpectedRuntimeSourceHash $runtimeSourceHash -ExpectedUpstreamCli $upstreamCli -ExpectedHome $CodexHome -ExpectedSqliteHome $SqliteHome -ExpectedMaxThreads $maxThreads) {
     [pscustomobject]@{
       ok = $true
       reused = $false
@@ -217,6 +230,7 @@ do {
       sqliteHome = $SqliteHome
       upstreamCli = $upstreamCli
       upstreamCliSha256 = $expectedHash
+      runtimeSourceSha256 = $runtimeSourceHash
       maxThreads = $maxThreads
       logPath = $logPath
     } | ConvertTo-Json -Depth 5

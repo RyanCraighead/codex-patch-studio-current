@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const fs = require("fs");
+const crypto = require("crypto");
 const http = require("http");
 const path = require("path");
 const url = require("url");
@@ -8,6 +9,7 @@ const { spawn, execFileSync } = require("child_process");
 const { readJsonlLinesSync } = require("./jsonl-reader.cjs");
 
 const rootDir = path.resolve(__dirname, "..");
+const importManagerSourceSha256 = crypto.createHash("sha256").update(fs.readFileSync(__filename)).digest("hex");
 const publicDir = path.join(__dirname, "public");
 const stateExportsDir = path.join(rootDir, "augment-vscode-state-exports");
 const chatExportsDir = path.join(rootDir, "augment-chat-exports");
@@ -2946,7 +2948,12 @@ async function handleApi(request, requestUrl, response) {
   const parts = requestUrl.pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
 
   if (request.method === "GET" && requestUrl.pathname === "/api/health") {
-    sendJson(response, { ok: true, service: "codex-import-manager", pid: process.pid });
+    sendJson(response, {
+      ok: true,
+      service: "codex-import-manager",
+      pid: process.pid,
+      sourceSha256: importManagerSourceSha256,
+    });
     return;
   }
 

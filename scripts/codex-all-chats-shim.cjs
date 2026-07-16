@@ -313,6 +313,7 @@ function main() {
   const log = createLogger(options);
   if (!fs.existsSync(options.upstreamCli)) throw new Error(`Upstream Codex CLI does not exist: ${options.upstreamCli}`);
   const actualCliSha256 = sha256(options.upstreamCli);
+  const runtimeSourceSha256 = sha256(__filename);
   if (!options.skipCliHashCheck && options.expectedCliSha256 && actualCliSha256 !== options.expectedCliSha256) {
     throw new Error(`Upstream Codex CLI hash mismatch. Expected ${options.expectedCliSha256}, got ${actualCliSha256}.`);
   }
@@ -347,6 +348,7 @@ function main() {
       sqliteHome: options.sqliteHome,
       upstreamCli: options.upstreamCli,
       upstreamCliSha256: actualCliSha256,
+      runtimeSourceSha256,
       maxThreads: options.maxThreads,
       ...state,
     }));
@@ -407,6 +409,7 @@ function main() {
       codexHome: options.codexHome,
       sqliteHome: options.sqliteHome,
       upstreamCliSha256: actualCliSha256,
+      runtimeSourceSha256,
     });
   });
 }

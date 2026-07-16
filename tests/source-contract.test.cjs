@@ -64,6 +64,28 @@ test("source-only guard rejects distributable Codex artifacts and copied anchors
   assert.equal(report.ok, true);
 });
 
+test("managed runtime bridges reject stale source processes after rebuilds", () => {
+  const catalogShim = read("scripts/codex-all-chats-shim.cjs");
+  const catalogLauncher = read("scripts/start-codex-all-chats-shim.ps1");
+  const importManager = read("viewer/server.cjs");
+  const importLauncher = read("scripts/start-codex-import-manager.ps1");
+  const providerProxy = read("scripts/codex-responses-chat-proxy.cjs");
+  const providerLauncher = read("scripts/start-codex-provider-proxies.ps1");
+  const runtimeVerifier = read("scripts/verify-runtime-services.cjs");
+
+  assert.match(catalogShim, /runtimeSourceSha256/);
+  assert.match(catalogLauncher, /ExpectedRuntimeSourceHash/);
+  assert.match(catalogLauncher, /ExpectedUpstreamCli/);
+  assert.match(importManager, /importManagerSourceSha256/);
+  assert.match(importLauncher, /Test-ImportManagerReady/);
+  assert.match(providerProxy, /proxySourceSha256/);
+  assert.match(providerLauncher, /ExpectedProxySourceSha256/);
+  assert.match(runtimeVerifier, /Import manager is running stale source code/);
+  assert.match(runtimeVerifier, /Patch manager is running stale source code/);
+  assert.match(runtimeVerifier, /proxy is running stale source code/);
+  assert.match(runtimeVerifier, /catalog shim is running stale source code/);
+});
+
 test("source-only guard catches renamed copied minified anchors but permits authored replacements", () => {
   const copied = `const harmlessName = "${"x".repeat(320)}";\nreplaceExactly(source, harmlessName, "authored", "test");`;
   assert.equal(findEmbeddedUpstreamAnchors(copied).length, 1);

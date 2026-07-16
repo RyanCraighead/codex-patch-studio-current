@@ -26,6 +26,19 @@ function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
+function sameHash(left, right) {
+  return Boolean(left && right) && String(left).toLowerCase() === String(right).toLowerCase();
+}
+
+function samePath(left, right) {
+  if (!left || !right) return false;
+  const normalizedLeft = path.resolve(String(left));
+  const normalizedRight = path.resolve(String(right));
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
 async function getJson(name, url) {
   const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
   if (!response.ok) fail(`${name} returned HTTP ${response.status}: ${url}`);
@@ -48,19 +61,34 @@ async function getRendererJson(name, url) {
 }
 
 async function waitForCatalogShim(launcher, timeoutMs = 60_000) {
-  const port = Number(launcher.catalogShim?.basePort || 47851);
+  const basePort = Number(launcher.catalogShim?.basePort || 47851);
+  const portRange = 50;
+  const expectedSourceSha256 = sha256(path.join(root, "scripts", "codex-all-chats-shim.cjs"));
+  const expectedUpstreamCli = launcher.catalogShim?.upstreamCli;
+  const expectedCliSha256 = launcher.sourceAppServerCliSha256;
+  const expectedMaxThreads = Number(launcher.catalogShim?.maxThreads || 10000);
   const deadline = Date.now() + timeoutMs;
   let health = null;
   while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/health`, {
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (response.ok) {
-        health = await response.json();
-        if (health.ok === true && health.expansions >= 1 && health.lastCatalogCount >= 1) return health;
-      }
-    } catch {}
+    for (let port = basePort; port < basePort + portRange; port += 1) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/health`, {
+          signal: AbortSignal.timeout(1_000),
+        });
+        if (!response.ok) continue;
+        const candidate = await response.json();
+        const matches =
+          candidate.ok === true &&
+          candidate.service === "codex-all-chats-shim" &&
+          sameHash(candidate.runtimeSourceSha256, expectedSourceSha256) &&
+          sameHash(candidate.upstreamCliSha256, expectedCliSha256) &&
+          samePath(candidate.upstreamCli, expectedUpstreamCli) &&
+          Number(candidate.maxThreads) === expectedMaxThreads;
+        if (!matches) continue;
+        health = candidate;
+        if (candidate.expansions >= 1 && candidate.lastCatalogCount >= 1) return candidate;
+      } catch {}
+    }
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   return health;
@@ -161,6 +189,9 @@ async function main() {
     expandEnvironmentPath(launcher.sqliteHome || patchedHome),
   );
   const runtimeDb = path.join(runtimeSqliteHome, "state_5.sqlite");
+  const expectedImportManagerSha256 = sha256(path.join(root, "viewer", "server.cjs"));
+  const expectedPatchManagerSha256 = sha256(path.join(root, "codex-viewer", "server.cjs"));
+  const expectedProviderProxySha256 = sha256(path.join(root, "scripts", "codex-responses-chat-proxy.cjs"));
 
   for (const filePath of [launcher.codexExe, launcher.appAsar, stockConfig, patchedConfig, stockDb, runtimeDb]) {
     if (!filePath || !fs.existsSync(filePath)) fail(`Required runtime path is missing: ${filePath}`);
@@ -195,12 +226,27 @@ async function main() {
     ].map(async ([provider, port]) => {
       const health = await getJson(`${provider} proxy`, `http://127.0.0.1:${port}/health`);
       if (health.ok !== true || health.provider !== provider) fail(`${provider} proxy health is invalid.`);
+      if (!sameHash(health.sourceSha256, expectedProviderProxySha256)) {
+        fail(`${provider} proxy is running stale source code.`);
+      }
       if (requireProviderKeys && health.hasApiKey !== true) fail(`${provider} API key is not available to its proxy.`);
-      return { provider, port, ok: health.ok === true, hasApiKey: health.hasApiKey === true };
+      return {
+        provider,
+        port,
+        ok: health.ok === true,
+        hasApiKey: health.hasApiKey === true,
+        sourceSha256: health.sourceSha256,
+      };
     }),
   ]);
   if (imports.ok !== true || imports.service !== "codex-import-manager") {
     fail("Import manager health is invalid.");
+  }
+  if (!sameHash(imports.sourceSha256, expectedImportManagerSha256)) {
+    fail("Import manager is running stale source code.");
+  }
+  if (!sameHash(patcher.patchManagerSourceSha256, expectedPatchManagerSha256)) {
+    fail("Patch manager is running stale source code.");
   }
   if (featureDevelopment.ok !== true || !Array.isArray(featureDevelopment.modules)) {
     fail("Feature Development bridge returned an invalid catalog.");
@@ -235,6 +281,12 @@ async function main() {
     }
     if (String(catalogShim.upstreamCliSha256 || "").toLowerCase() !== String(launcher.sourceAppServerCliSha256 || "").toLowerCase()) {
       fail("All-chats catalog shim is not using the pinned app-server CLI.");
+    }
+    if (!sameHash(catalogShim.runtimeSourceSha256, sha256(path.join(root, "scripts", "codex-all-chats-shim.cjs")))) {
+      fail("All-chats catalog shim is running stale source code.");
+    }
+    if (!samePath(catalogShim.upstreamCli, launcher.catalogShim?.upstreamCli)) {
+      fail("All-chats catalog shim is running against a different clone path.");
     }
   } else if (
     !renderer.historyHydration ||
