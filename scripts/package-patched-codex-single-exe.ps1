@@ -459,7 +459,8 @@ $sourceManifest = [ordered]@{
   shareChatDatabaseWithStock = $shareChatDatabaseWithStock
   portableElectronProfile = $portableElectronProfileEnabled
 }
-$sourceManifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $payloadRoot "bundle-source.json") -Encoding UTF8
+$sourceManifestJson = $sourceManifest | ConvertTo-Json -Depth 20
+Write-Utf8NoBom -Path (Join-Path $payloadRoot "bundle-source.json") -Value $sourceManifestJson
 
 $payloadVerifierPath = Join-Path $payloadRoot "scripts\verify-portable-payload.cjs"
 Write-Host "Verifying dormant portable payload before compression."
@@ -566,7 +567,7 @@ $manifest = [ordered]@{
   payloadCompressionProfile = $compressionProfileName
 }
 $manifestJson = $manifest | ConvertTo-Json -Depth 20
-Set-Content -LiteralPath $manifestPath -Value $manifestJson -Encoding UTF8
+Write-Utf8NoBom -Path $manifestPath -Value $manifestJson
 
 $bootstrap = @'
 $ErrorActionPreference = "Stop"
@@ -577,6 +578,15 @@ function Write-BundleLog {
   New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
   $line = "[{0}] {1}" -f (Get-Date).ToString("yyyy-MM-dd HH:mm:ss.fff"), $Message
   Add-Content -LiteralPath (Join-Path $logRoot "codex-patch-studio-current-bundle.log") -Value $line -Encoding UTF8
+}
+
+function Write-Utf8NoBom {
+  param(
+    [string]$Path,
+    [string]$Value
+  )
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Value, $encoding)
 }
 
 function Assert-ChildPath {
@@ -736,12 +746,13 @@ try {
     if (-not (Test-Path -LiteralPath $launchScriptPath -PathType Leaf)) {
       throw "Bundled launch script missing after extraction: $launchScriptPath"
     }
-    [ordered]@{
+    $markerJson = [ordered]@{
       bundleId = [string]$manifest.bundleId
       bundleName = [string]$manifest.bundleName
       payloadSha256 = [string]$manifest.payloadSha256
       extractedAt = (Get-Date).ToUniversalTime().ToString("o")
-    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $markerPath -Encoding UTF8
+    } | ConvertTo-Json -Depth 6
+    Write-Utf8NoBom -Path $markerPath -Value $markerJson
   } else {
     Write-BundleLog "Using existing extracted bundle at $targetRoot"
   }
@@ -829,14 +840,18 @@ try {
     appAsar = (Join-Path $resourcesDir "app.asar")
     originalAppAsarBackup = $null
   }
-  $launcherConfig | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $targetRoot "codex-launcher.local.json") -Encoding UTF8
+  $launcherConfigPath = Join-Path $targetRoot "codex-launcher.local.json"
+  $launcherConfigJson = $launcherConfig | ConvertTo-Json -Depth 20
+  Write-Utf8NoBom -Path $launcherConfigPath -Value $launcherConfigJson
 
   $runtimePatchManifest = [ordered]@{}
   foreach ($entry in $launcherConfig.GetEnumerator()) {
     $runtimePatchManifest[$entry.Key] = $entry.Value
   }
   $runtimePatchManifest["payloadSha256"] = [string]$manifest.payloadSha256
-  $runtimePatchManifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $targetRoot "patch-manifest.json") -Encoding UTF8
+  $runtimePatchManifestPath = Join-Path $targetRoot "patch-manifest.json"
+  $runtimePatchManifestJson = $runtimePatchManifest | ConvertTo-Json -Depth 20
+  Write-Utf8NoBom -Path $runtimePatchManifestPath -Value $runtimePatchManifestJson
 
   $bundledNodeCandidates = @(
     (Join-Path $resourcesDir "cua_node\bin\node.exe"),

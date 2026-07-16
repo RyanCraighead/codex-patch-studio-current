@@ -108,9 +108,9 @@ test("portable bootstrap serializes extraction and self-heals incomplete runtime
   const hereStringStart = packager.indexOf("$bootstrap = @'");
   const bootstrapStart = packager.indexOf("$bundleMutex = $null", hereStringStart);
   const bootstrapEnd = packager.indexOf("'@", bootstrapStart);
-  const bootstrap = packager.slice(bootstrapStart, bootstrapEnd);
+  const bootstrap = packager.slice(hereStringStart, bootstrapEnd);
   const extractionIndex = bootstrap.indexOf('Write-BundleLog "Extracting');
-  const markerWriteIndex = bootstrap.indexOf("Set-Content -LiteralPath $markerPath");
+  const markerWriteIndex = bootstrap.indexOf("Write-Utf8NoBom -Path $markerPath");
   const appAsarValidationIndex = bootstrap.indexOf(
     'throw "Bundled app.asar missing after extraction: $appAsarPath"',
   );
@@ -124,6 +124,8 @@ test("portable bootstrap serializes extraction and self-heals incomplete runtime
   assert.match(bootstrap, /Local\\CodexPatchStudioCurrent\.Bundle\./);
   assert.match(bootstrap, /WaitOne\(\[TimeSpan\]::FromMinutes\(10\)\)/);
   assert.match(bootstrap, /System\.Threading\.AbandonedMutexException/);
+  assert.match(bootstrap, /function Write-Utf8NoBom/);
+  assert.match(bootstrap, /System\.Text\.UTF8Encoding\(\$false\)/);
   assert.match(bootstrap, /\$runtimePayloadPresent/);
   assert.match(bootstrap, /app\\resources\\app\.asar/);
   assert.match(bootstrap, /scripts\\launch-patched-codex\.ps1/);
@@ -134,7 +136,14 @@ test("portable bootstrap serializes extraction and self-heals incomplete runtime
   assert.ok(extractionIndex >= 0, "portable extraction block is missing");
   assert.ok(appAsarValidationIndex > extractionIndex, "app.asar is not validated after extraction");
   assert.ok(markerWriteIndex > appAsarValidationIndex, "completion marker is written before validation");
+  assert.match(bootstrap, /Write-Utf8NoBom -Path \$markerPath -Value \$markerJson/);
+  assert.match(bootstrap, /Write-Utf8NoBom -Path \$launcherConfigPath -Value \$launcherConfigJson/);
+  assert.match(bootstrap, /Write-Utf8NoBom -Path \$runtimePatchManifestPath -Value \$runtimePatchManifestJson/);
   assert.match(bootstrap, /finally \{[\s\S]*ReleaseMutex\(\)[\s\S]*Dispose\(\)/);
+  assert.match(
+    read("scripts/verify-current-patched-build.cjs"),
+    /readFileSync\(filePath, "utf8"\)\.replace\(\/\^\\uFEFF\//,
+  );
 });
 
 test("update detection fingerprints the runtime verification contract", () => {
