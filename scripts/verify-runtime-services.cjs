@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const WebSocket = require("ws");
+const { resolveListeningProcess } = require("./resolve-listening-process.cjs");
 
 const root = path.resolve(__dirname, "..");
 const requireProviderKeys = process.argv.includes("--require-provider-keys");
@@ -94,9 +95,9 @@ async function waitForCatalogShim(launcher, timeoutMs = 60_000) {
   return health;
 }
 
-async function findPageTarget() {
+async function findPageTarget(desktopProcess) {
   let lastError;
-  for (const host of ["127.0.0.1", "localhost"]) {
+  for (const host of desktopProcess.hosts) {
     try {
       const response = await fetch(`http://${host}:${cdpPort}/json/list`, {
         signal: AbortSignal.timeout(5_000),
@@ -106,7 +107,7 @@ async function findPageTarget() {
       const target =
         targets.find((entry) => entry.type === "page" && entry.url === "app://-/index.html") ||
         targets.find((entry) => entry.type === "page");
-      if (target?.webSocketDebuggerUrl) return target;
+      if (target?.webSocketDebuggerUrl) return { host, target };
     } catch (error) {
       lastError = error;
     }
@@ -214,6 +215,11 @@ async function main() {
     fail("Configured stock chat database sharing is not active.");
   }
 
+  const desktopProcess = resolveListeningProcess(cdpPort, {
+    expectedExecutablePath: launcher.codexExe,
+    expectedUserDataPath: launcher.electronUserDataPath,
+  });
+
   const [imports, patcher, featureDevelopment, ...providerHealth] = await Promise.all([
     getJson("import manager", "http://127.0.0.1:4577/api/health"),
     getJson("patch manager", "http://127.0.0.1:4590/api/patch/status"),
@@ -252,7 +258,7 @@ async function main() {
     fail("Feature Development bridge returned an invalid catalog.");
   }
 
-  const target = await findPageTarget();
+  const { host: devToolsHost, target } = await findPageTarget(desktopProcess);
   const catalogShimEnabled = launcher.features?.catalogShim === true && launcher.catalogShim?.enabled === true;
   const catalogShim = catalogShimEnabled ? await waitForCatalogShim(launcher) : null;
   if (!catalogShimEnabled) await waitForHistoryHydration(target, Number(launcher.limit));
@@ -307,6 +313,14 @@ async function main() {
           version: launcher.sourceVersion,
           asarSha256: launcher.sourceAsarSha256,
           manifestBuiltAt: manifest.builtAt,
+        },
+        desktopProcess: {
+          port: cdpPort,
+          pid: desktopProcess.pid,
+          executablePath: desktopProcess.executablePath,
+          userDataPath: desktopProcess.userDataPath,
+          localAddress: desktopProcess.localAddress,
+          host: devToolsHost,
         },
         services: {
           importManager: { ok: imports.ok === true, service: imports.service },

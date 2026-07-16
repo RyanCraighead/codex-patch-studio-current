@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const crypto = require("node:crypto");
 const path = require("node:path");
 const WebSocket = require("ws");
+const { resolveListeningProcess } = require("./resolve-listening-process.cjs");
 
 const port = Number(process.argv[2] || process.env.CODEX_PATCHED_REMOTE_DEBUGGING_PORT || 9229);
 const root = path.resolve(__dirname, "..");
@@ -35,14 +36,16 @@ async function delay(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function pageTarget() {
+async function pageTarget(desktopProcess) {
   let targets = null;
   let lastError = null;
-  for (const host of ["127.0.0.1", "localhost"]) {
+  let connectedHost = null;
+  for (const host of desktopProcess.hosts) {
     try {
       const response = await fetch(`http://${host}:${port}/json/list`);
       if (!response.ok) throw new Error(`CDP endpoint returned ${response.status}.`);
       targets = await response.json();
+      connectedHost = host;
       break;
     } catch (error) {
       lastError = error;
@@ -58,7 +61,7 @@ async function pageTarget() {
   if (!target?.webSocketDebuggerUrl) {
     throw new Error(`No Codex page target is exposed by CDP on port ${port}. Relaunch the patched app and retry.`);
   }
-  return target;
+  return { connectedHost, target };
 }
 
 async function waitForCatalogShim(timeoutMs = 60_000) {
@@ -290,7 +293,11 @@ async function snapshot(client, name) {
 }
 
 async function main() {
-  const target = await pageTarget();
+  const desktopProcess = resolveListeningProcess(port, {
+    expectedExecutablePath: launcher.codexExe,
+    expectedUserDataPath: launcher.electronUserDataPath,
+  });
+  const { connectedHost, target } = await pageTarget(desktopProcess);
   const client = new CdpClient(target.webSocketDebuggerUrl);
   await client.open();
   await client.send("Runtime.enable");
@@ -308,7 +315,19 @@ async function main() {
   }
   if (catalogShimEnabled) catalogShim = await waitForCatalogShim();
 
-  const results = { target: { title: target.title, url: target.url }, catalogShim, views: {} };
+  const results = {
+    desktopProcess: {
+      port,
+      pid: desktopProcess.pid,
+      executablePath: desktopProcess.executablePath,
+      userDataPath: desktopProcess.userDataPath,
+      localAddress: desktopProcess.localAddress,
+      host: connectedHost,
+    },
+    target: { title: target.title, url: target.url },
+    catalogShim,
+    views: {},
+  };
   const navigationBridgeReady = await client.evaluate(`typeof globalThis.__codexNativeNavigate === 'function'`);
   if (!navigationBridgeReady) throw new Error("Current Codex navigation bridge did not initialize.");
   await client.evaluate(`globalThis.__codexNativeNavigate('/')`);
@@ -372,7 +391,7 @@ async function main() {
   client.close();
   const summaryPath = path.join(outputDir, "summary.json");
   fs.writeFileSync(summaryPath, `${JSON.stringify(results, null, 2)}\n`, "utf8");
-  process.stdout.write(`${JSON.stringify({ ok: true, summaryPath, views: Object.fromEntries(Object.entries(results.views).map(([key, value]) => [key, { href: value.href, imagePath: value.imagePath, customHosts: value.customHosts }])) }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ ok: true, desktopProcess: results.desktopProcess, summaryPath, views: Object.fromEntries(Object.entries(results.views).map(([key, value]) => [key, { href: value.href, imagePath: value.imagePath, customHosts: value.customHosts }])) }, null, 2)}\n`);
 }
 
 main().catch((error) => {

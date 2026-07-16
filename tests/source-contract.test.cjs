@@ -48,6 +48,27 @@ test("runtime verifiers support lazy all-chats mode", () => {
   assert.match(uiVerifier, /Main view remained on a settings route/);
 });
 
+test("runtime and UI verification bind DevTools to the configured desktop clone", () => {
+  const resolver = read("scripts/resolve-listening-process.cjs");
+  const runtimeVerifier = read("scripts/verify-runtime-services.cjs");
+  const uiVerifier = read("scripts/verify-current-ui.cjs");
+  assert.match(resolver, /Get-NetTCPConnection/);
+  assert.match(resolver, /Get-CimInstance Win32_Process/);
+  assert.doesNotMatch(resolver, /Select-Object -First 1/);
+  assert.match(resolver, /expectedExecutablePath/);
+  assert.match(resolver, /expectedUserDataPath/);
+  assert.match(resolver, /hostsForAddress/);
+  assert.match(resolver, /windowsHide: true/);
+  assert.match(runtimeVerifier, /resolveListeningProcess\(cdpPort, \{/);
+  assert.match(runtimeVerifier, /launcher\.codexExe/);
+  assert.match(runtimeVerifier, /launcher\.electronUserDataPath/);
+  assert.match(runtimeVerifier, /findPageTarget\(desktopProcess\)/);
+  assert.match(uiVerifier, /resolveListeningProcess\(port, \{/);
+  assert.match(uiVerifier, /launcher\.codexExe/);
+  assert.match(uiVerifier, /launcher\.electronUserDataPath/);
+  assert.match(uiVerifier, /pageTarget\(desktopProcess\)/);
+});
+
 test("Codex rollout indexing is bounded and import health is lightweight", () => {
   const viewer = read("viewer/server.cjs");
   const launcher = read("scripts/start-codex-import-manager.ps1");
@@ -169,6 +190,7 @@ test("native payload JavaScript parses", () => {
     "scripts/build-patched-codex-app.cjs",
     "scripts/codex-responses-chat-proxy.cjs",
     "scripts/export-augment-webview-state.cjs",
+    "scripts/resolve-listening-process.cjs",
     "scripts/verify-portable-payload.cjs",
     "scripts/verify-runtime-services.cjs",
   ]) {
