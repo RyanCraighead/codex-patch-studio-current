@@ -103,6 +103,40 @@ test("portable payload uses long-path-safe verified extraction", () => {
   assert.match(read("scripts/verify-runtime-services.cjs"), /CODEX_PATCHED_LAUNCHER_CONFIG/);
 });
 
+test("portable bootstrap serializes extraction and self-heals incomplete runtimes", () => {
+  const packager = read("scripts/package-patched-codex-single-exe.ps1");
+  const hereStringStart = packager.indexOf("$bootstrap = @'");
+  const bootstrapStart = packager.indexOf("$bundleMutex = $null", hereStringStart);
+  const bootstrapEnd = packager.indexOf("'@", bootstrapStart);
+  const bootstrap = packager.slice(bootstrapStart, bootstrapEnd);
+  const extractionIndex = bootstrap.indexOf('Write-BundleLog "Extracting');
+  const markerWriteIndex = bootstrap.indexOf("Set-Content -LiteralPath $markerPath");
+  const appAsarValidationIndex = bootstrap.indexOf(
+    'throw "Bundled app.asar missing after extraction: $appAsarPath"',
+  );
+
+  assert.ok(hereStringStart >= 0, "portable bootstrap here-string is missing");
+  assert.ok(
+    bootstrapStart > hereStringStart,
+    "portable bootstrap mutex initialization is missing",
+  );
+  assert.match(bootstrap, /System\.Threading\.Mutex/);
+  assert.match(bootstrap, /Local\\CodexPatchStudioCurrent\.Bundle\./);
+  assert.match(bootstrap, /WaitOne\(\[TimeSpan\]::FromMinutes\(10\)\)/);
+  assert.match(bootstrap, /System\.Threading\.AbandonedMutexException/);
+  assert.match(bootstrap, /\$runtimePayloadPresent/);
+  assert.match(bootstrap, /app\\resources\\app\.asar/);
+  assert.match(bootstrap, /scripts\\launch-patched-codex\.ps1/);
+  assert.match(
+    bootstrap,
+    /if \(\(Test-Path -LiteralPath \$markerPath\) -and \$runtimePayloadPresent\)/,
+  );
+  assert.ok(extractionIndex >= 0, "portable extraction block is missing");
+  assert.ok(appAsarValidationIndex > extractionIndex, "app.asar is not validated after extraction");
+  assert.ok(markerWriteIndex > appAsarValidationIndex, "completion marker is written before validation");
+  assert.match(bootstrap, /finally \{[\s\S]*ReleaseMutex\(\)[\s\S]*Dispose\(\)/);
+});
+
 test("update detection fingerprints the runtime verification contract", () => {
   const fingerprint = read("scripts/patcher-fingerprint.cjs");
   for (const dependency of [

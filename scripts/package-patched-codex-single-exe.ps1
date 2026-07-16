@@ -628,6 +628,9 @@ function Get-Sha256Hex {
   }
 }
 
+$bundleMutex = $null
+$bundleMutexAcquired = $false
+
 try {
   $sfxRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
   $manifestPath = Join-Path $sfxRoot "bundle-manifest.json"
@@ -647,6 +650,23 @@ try {
   $profileRoot = Join-Path $profileBase ([string]$manifest.bundleId)
   Assert-ChildPath -Base $bundleBase -Path $targetRoot
   Assert-ChildPath -Base $profileBase -Path $profileRoot
+
+  $mutexToken = ([string]$manifest.bundleId -replace '[^A-Za-z0-9_.-]', '_')
+  if (-not $mutexToken) {
+    throw "Bundle manifest has an invalid bundleId for extraction locking."
+  }
+  $mutexName = "Local\CodexPatchStudioCurrent.Bundle.$mutexToken"
+  $bundleMutex = [System.Threading.Mutex]::new($false, $mutexName)
+  try {
+    $bundleMutexAcquired = $bundleMutex.WaitOne([TimeSpan]::FromMinutes(10))
+  } catch [System.Threading.AbandonedMutexException] {
+    $bundleMutexAcquired = $true
+    Write-BundleLog "Recovered abandoned bundle extraction lock $mutexName."
+  }
+  if (-not $bundleMutexAcquired) {
+    throw "Timed out waiting for bundle extraction lock $mutexName."
+  }
+
   New-Item -ItemType Directory -Force -Path $bundleBase, $profileRoot | Out-Null
 
   $desktopExecutableName = [string]$manifest.sourceDesktopExecutableName
@@ -660,9 +680,15 @@ try {
   if (-not $desktopExecutablePresent -and $allowLegacyDesktopFallback) {
     $desktopExecutablePresent = Test-Path -LiteralPath $legacyCodexExe -PathType Leaf
   }
+  $appAsarPath = Join-Path $targetRoot "app\resources\app.asar"
+  $launchScriptPath = Join-Path $targetRoot "scripts\launch-patched-codex.ps1"
+  $runtimePayloadPresent = `
+    $desktopExecutablePresent -and `
+    (Test-Path -LiteralPath $appAsarPath -PathType Leaf) -and `
+    (Test-Path -LiteralPath $launchScriptPath -PathType Leaf)
   $markerPath = Join-Path $targetRoot ".bundle-complete.json"
   $needsExtract = $true
-  if ((Test-Path -LiteralPath $markerPath) -and $desktopExecutablePresent) {
+  if ((Test-Path -LiteralPath $markerPath) -and $runtimePayloadPresent) {
     try {
       $marker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
       $needsExtract = ([string]$marker.payloadSha256 -ne [string]$manifest.payloadSha256)
@@ -696,6 +722,19 @@ try {
     & $sevenZip x -y "-o$targetRoot" $payloadArchive | Out-Null
     if ($LASTEXITCODE -ne 0) {
       throw "Bundled payload extraction failed with exit code $LASTEXITCODE."
+    }
+    $desktopExecutablePresent = Test-Path -LiteralPath $codexExe -PathType Leaf
+    if (-not $desktopExecutablePresent -and $allowLegacyDesktopFallback) {
+      $desktopExecutablePresent = Test-Path -LiteralPath $legacyCodexExe -PathType Leaf
+    }
+    if (-not $desktopExecutablePresent) {
+      throw "Bundled desktop executable missing after extraction: $codexExe"
+    }
+    if (-not (Test-Path -LiteralPath $appAsarPath -PathType Leaf)) {
+      throw "Bundled app.asar missing after extraction: $appAsarPath"
+    }
+    if (-not (Test-Path -LiteralPath $launchScriptPath -PathType Leaf)) {
+      throw "Bundled launch script missing after extraction: $launchScriptPath"
     }
     [ordered]@{
       bundleId = [string]$manifest.bundleId
@@ -836,6 +875,16 @@ try {
 } catch {
   Write-BundleLog "Bundle launch failed: $($_.Exception.Message)"
   throw
+} finally {
+  if ($bundleMutexAcquired -and $null -ne $bundleMutex) {
+    try {
+      $bundleMutex.ReleaseMutex()
+    } catch {
+    }
+  }
+  if ($null -ne $bundleMutex) {
+    $bundleMutex.Dispose()
+  }
 }
 '@
 Write-Utf8NoBom -Path $bootstrapPath -Value $bootstrap
