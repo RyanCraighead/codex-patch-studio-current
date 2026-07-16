@@ -90,7 +90,7 @@ The launcher compares four local things before every launch:
 3. Generated clone, launcher metadata, and executable presence.
 4. Patcher source fingerprint.
 
-It can also consult the cached repository stable-channel manifest when that optional channel is enabled. The committed channel is disabled by default because this repository is private; manual **Check Codex + GitHub** remains available, and `manifestUrl` can be overridden with a reachable HTTPS endpoint.
+It can also consult the cached repository stable-channel manifest when that optional channel is enabled. The committed channel is disabled by default because this repository is private; manual **Check updates** remains available, and `manifestUrl` can be overridden with a reachable HTTPS endpoint.
 
 If nothing changed, launch is immediate. When Codex or patcher source changes, behavior follows the selected policy:
 

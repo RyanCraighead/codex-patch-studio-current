@@ -268,7 +268,7 @@ if ($RefreshRemote -or ($remoteChannelEnabled -and $configuredUpdatePolicy -ne "
   $remoteChannelWarning = if ($configuredUpdatePolicy -eq "off") {
     "Repository checks are disabled by the update policy."
   } else {
-    "Automatic repository checks are disabled. Use Check Codex + GitHub to run one manually."
+    "Automatic repository checks are disabled. Use Check updates to run one manually."
   }
   $remoteUpdate = [pscustomobject]@{
     ok = $true

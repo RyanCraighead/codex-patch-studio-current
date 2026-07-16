@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "channel": "stable",
   "revision": 1,
-  "publishedAt": "2026-07-16T11:47:05.276Z",
+  "publishedAt": "2026-07-16T11:54:02.048Z",
   "patcher": {
     "version": "0.1.0",
     "releaseUrl": "https://github.com/RyanCraighead/codex-patch-studio-current/releases",
-    "sourceSha256": "829b1c5d6bfa4fd2ad3fcb9c12e9ed515bef8e3bd01ecb574938dbe559eba3cc"
+    "sourceSha256": "512c570f9e250869c19e45bfd03a6a33147db088422ae61ca4b3356b618353c6"
   },
   "codex": {
     "packageName": "OpenAI.Codex",

@@ -780,7 +780,7 @@
         <span>Repository Codex support</span><strong>${escapeHtml(compatibilityLabels[compatibility.status] || compatibility.status || "Unknown")}</strong>
         <span>Channel source</span><strong>${escapeHtml(network.source || "Not checked")}</strong>
       </div>
-      ${network.warning ? `<div class="cpx-note">${escapeHtml(network.warning)} Local validation and the last-known-good clone remain available.</div>` : ""}
+      ${network.warning ? `<div class="cpx-note">${escapeHtml(network.warning)}<br>Local validation and the last-known-good clone remain available.</div>` : ""}
     `;
   }
 
@@ -997,7 +997,7 @@
               </div>
               <div class="cpx-band-actions">
                 ${state.updateState?.remoteUpdate?.repository?.updateAvailable ? `<button class="cpx-button" type="button" data-action="open-patcher-release">Open release</button>` : ""}
-                <button class="cpx-button" type="button" data-action="check-update" ${state.busy || state.bridge !== "online" ? "disabled" : ""}>Check Codex + GitHub</button>
+                <button class="cpx-button" type="button" data-action="check-update" ${state.busy || state.bridge !== "online" ? "disabled" : ""}>Check updates</button>
                 <button class="cpx-button cpx-primary" type="button" data-action="apply-update" ${state.busy || state.bridge !== "online" || !state.updateState?.needsBuild ? "disabled" : ""}>Rebuild now</button>
               </div>
             </div>

@@ -6,7 +6,7 @@
 2. The configured policy determines whether detection is Off, Notify, or Auto rebuild.
 3. `ensure-current-codex-patch.ps1` performs one installed-package check when policy permits it.
 4. It compares installed version, package identity, `app.asar` fingerprint, generated executable, and patcher source fingerprint with `codex-launcher.local.json`.
-5. When the optional repository channel is enabled, it reads the cache or refreshes it after the configured TTL. A manual **Check Codex + GitHub** runs a one-shot refresh even when automatic channel checks are disabled.
+5. When the optional repository channel is enabled, it reads the cache or refreshes it after the configured TTL. A manual **Check updates** runs a one-shot refresh even when automatic channel checks are disabled.
 6. When everything matches, it initializes the patched home, starts local bridges, and opens the clone.
 
 ## GitHub Compatibility Channel
