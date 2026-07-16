@@ -141,6 +141,49 @@ function Show-CodexUpdatePrompt {
   return $result -eq [System.Windows.Forms.DialogResult]::Yes
 }
 
+function Show-RepositoryUpdatePrompt {
+  param([object]$RemoteUpdate)
+
+  Add-Type -AssemblyName System.Windows.Forms
+  $repository = $RemoteUpdate.repository
+  $detail = @(
+    "A newer Codex Patch Studio source release is available.",
+    "",
+    "Installed patcher: $($repository.localVersion) (channel revision $($repository.localRevision))",
+    "GitHub patcher: $($repository.remoteVersion) (channel revision $($repository.remoteRevision))",
+    "Installed Codex compatibility: $($RemoteUpdate.compatibility.status)",
+    "",
+    "Open the verified source release page? The current patcher and last-known-good clone will remain unchanged."
+  ) -join "`r`n"
+  $result = [System.Windows.Forms.MessageBox]::Show(
+    $detail,
+    "Codex Patch Studio source update",
+    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+    [System.Windows.Forms.MessageBoxIcon]::Information,
+    [System.Windows.Forms.MessageBoxDefaultButton]::Button1
+  )
+  return $result -eq [System.Windows.Forms.DialogResult]::Yes
+}
+
+function Mark-RepositoryUpdateNotified {
+  param([string]$NotificationKey)
+
+  if (-not $NotificationKey) {
+    return
+  }
+  $node = if ($env:CODEX_PATCHED_NODE -and (Test-Path -LiteralPath $env:CODEX_PATCHED_NODE)) {
+    $env:CODEX_PATCHED_NODE
+  } else {
+    "node"
+  }
+  $checker = Join-Path $RepoRoot "scripts\check-remote-update-channel.cjs"
+  try {
+    & $node $checker --mark-notified $NotificationKey | Out-Null
+  } catch {
+    Write-Log "Could not record the repository update notification: $($_.Exception.Message)"
+  }
+}
+
 function Show-CodexUpdateFailure {
   param([string]$Message)
 
@@ -199,6 +242,18 @@ try {
         $checkResult = & (Join-Path $PSScriptRoot "ensure-current-codex-patch.ps1") -CheckOnly -Quiet
         $checkSummary = $checkResult | ConvertFrom-Json
         Write-Log "Patch check complete. installed=$($checkSummary.installedVersion) patched=$($checkSummary.patchedVersion) needsBuild=$($checkSummary.needsBuild) reasons=$(@($checkSummary.reasons) -join ',')"
+
+        $remoteUpdate = $checkSummary.remoteUpdate
+        if ($remoteUpdate.repository.updateAvailable -eq $true) {
+          Write-Log "A newer patcher source release is available: local=$($remoteUpdate.repository.localVersion)/$($remoteUpdate.repository.localRevision) remote=$($remoteUpdate.repository.remoteVersion)/$($remoteUpdate.repository.remoteRevision)."
+          if ($updatePolicy -eq "notify" -and $remoteUpdate.repository.shouldNotify -eq $true) {
+            $openRelease = Show-RepositoryUpdatePrompt -RemoteUpdate $remoteUpdate
+            Mark-RepositoryUpdateNotified -NotificationKey ([string]$remoteUpdate.repository.notificationKey)
+            if ($openRelease -and $remoteUpdate.repository.releaseUrl) {
+              Start-Process -FilePath ([string]$remoteUpdate.repository.releaseUrl) | Out-Null
+            }
+          }
+        }
 
         $promptAccepted = $null
         if ($updatePolicy -eq "notify" -and $checkSummary.needsBuild) {

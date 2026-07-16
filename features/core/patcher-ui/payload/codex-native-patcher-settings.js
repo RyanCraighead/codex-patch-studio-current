@@ -356,7 +356,7 @@
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: "{}",
+            body: JSON.stringify({ refreshRemote: false }),
           },
           120000
         );
@@ -433,7 +433,7 @@
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: "{}",
+          body: JSON.stringify({ refreshRemote: true }),
         },
         120000
       );
@@ -443,9 +443,11 @@
       } catch (featureError) {
         state.featureDevelopmentError = featureError.message || String(featureError);
       }
-      state.status = state.updateState.needsBuild
-        ? "A Codex or patch framework update requires a verified rebuild."
-        : "The patched clone is current.";
+      state.status = state.updateState.remotePatcherUpdateAvailable
+        ? "A newer patcher source release is available on GitHub."
+        : state.updateState.needsBuild
+          ? "A Codex or patch framework update requires a verified rebuild."
+          : "The patched clone and repository channel are current.";
     } catch (error) {
       state.updateStateError = error.message || String(error);
       state.error = state.updateStateError;
@@ -748,13 +750,37 @@
       return `<div class="cpx-note">Update state has not been checked yet.</div>`;
     }
     const reasons = Array.isArray(state.updateState.reasons) ? state.updateState.reasons : [];
+    const remote = state.updateState.remoteUpdate;
+    const repository = remote?.repository || {};
+    const compatibility = remote?.compatibility || {};
+    const network = remote?.network || {};
+    const repositoryState = repository.updateAvailable
+      ? `Update available (${repository.remoteVersion || "new source"})`
+      : repository.diverged
+        ? "Local source differs"
+      : network.source === "policy-off" || network.source === "channel-disabled"
+        ? "Check disabled"
+        : network.reachable || String(network.source || "").startsWith("cache")
+          ? "Current"
+          : "Unavailable";
+    const compatibilityLabels = {
+      verified: "Verified exact build",
+      "fingerprint-mismatch": "Version known, fingerprint differs",
+      pending: "Not yet repository-verified",
+      "not-checked": "Not checked",
+      unknown: "Unknown",
+    };
     return `
       <div class="cpx-config-grid">
         <span>Installed Codex</span><strong>${escapeHtml(state.updateState.installedVersion || "Unknown")}</strong>
         <span>Patched Codex</span><strong>${escapeHtml(state.updateState.patchedVersion || "Not built")}</strong>
         <span>Build state</span><strong>${state.updateState.needsBuild ? "Rebuild required" : "Current"}</strong>
         <span>Reason</span><strong>${escapeHtml(reasons.join(", ") || "No changes detected")}</strong>
+        <span>GitHub patcher</span><strong>${escapeHtml(repositoryState)}</strong>
+        <span>Repository Codex support</span><strong>${escapeHtml(compatibilityLabels[compatibility.status] || compatibility.status || "Unknown")}</strong>
+        <span>Channel source</span><strong>${escapeHtml(network.source || "Not checked")}</strong>
       </div>
+      ${network.warning ? `<div class="cpx-note">${escapeHtml(network.warning)} Local validation and the last-known-good clone remain available.</div>` : ""}
     `;
   }
 
@@ -966,11 +992,12 @@
           <section class="cpx-band cpx-wide">
             <div class="cpx-band-head">
               <div>
-                <strong>Codex updates</strong>
-                <small>Codex updates can change internal patch anchors. Checks are one-shot at launch or when you press Check now.</small>
+                <strong>Codex and patcher updates</strong>
+                <small>Checks compare the installed Codex build locally and consult the cached GitHub compatibility channel. GitHub is force-refreshed only when you press Check now.</small>
               </div>
               <div class="cpx-band-actions">
-                <button class="cpx-button" type="button" data-action="check-update" ${state.busy || state.bridge !== "online" ? "disabled" : ""}>Check now</button>
+                ${state.updateState?.remoteUpdate?.repository?.updateAvailable ? `<button class="cpx-button" type="button" data-action="open-patcher-release">Open release</button>` : ""}
+                <button class="cpx-button" type="button" data-action="check-update" ${state.busy || state.bridge !== "online" ? "disabled" : ""}>Check Codex + GitHub</button>
                 <button class="cpx-button cpx-primary" type="button" data-action="apply-update" ${state.busy || state.bridge !== "online" || !state.updateState?.needsBuild ? "disabled" : ""}>Rebuild now</button>
               </div>
             </div>
@@ -1051,6 +1078,10 @@
       });
     });
     host.querySelector('[data-action="check-update"]')?.addEventListener("click", checkForCodexUpdate);
+    host.querySelector('[data-action="open-patcher-release"]')?.addEventListener("click", () => {
+      const releaseUrl = state.updateState?.remoteUpdate?.repository?.releaseUrl;
+      if (releaseUrl) window.open(releaseUrl, "_blank", "noopener");
+    });
     host.querySelector('[data-action="apply-update"]')?.addEventListener("click", applyCodexUpdate);
     host.querySelectorAll("[data-runtime-feature]").forEach((input) => {
       input.addEventListener("change", () => {

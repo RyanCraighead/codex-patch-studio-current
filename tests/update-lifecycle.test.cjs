@@ -119,8 +119,12 @@ test("the real setup, launcher, and builder use the tested update lifecycle", ()
   assert.match(launcher, /Show-CodexUpdatePrompt/);
   assert.match(launcher, /Get-CodexUpdatePromptText/);
   assert.match(launcher, /Get-CodexUpdateFailureText/);
+  assert.match(launcher, /Show-RepositoryUpdatePrompt/);
+  assert.match(launcher, /Mark-RepositoryUpdateNotified/);
+  assert.match(launcher, /remoteUpdate\.repository\.shouldNotify/);
   assert.match(launcher, /CODEX_ALLOW_STALE_PATCHED_LAUNCH/);
   assert.match(builder, /promoteVerifiedJson\(launcherConfigPath/);
+  assert.match(builder, /featureModules: featureModuleCatalog,\s*packedVerification,/);
   assert.ok(builder.indexOf("const packedVerification = verifyPackedAsar") < builder.indexOf("promoteVerifiedJson(launcherConfigPath"));
   assert.ok(builder.indexOf("writeJson(patchManifestPath") < builder.indexOf("promoteVerifiedJson(launcherConfigPath"));
   assert.equal((builder.match(/promoteVerifiedJson\(launcherConfigPath/g) || []).length, 1);

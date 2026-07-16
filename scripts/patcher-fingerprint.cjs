@@ -8,6 +8,7 @@ const { catalogFingerprint, discoverFeatureModules } = require("./feature-regist
 const SOURCE_PATHS = [
   "config/compatibility.json",
   "config/patcher.json",
+  "config/update-channel.json",
   "features/core/imports/payload/codex-native-import-settings.js",
   "features/core/orchestrations/payload/codex-native-orchestrator.js",
   "features/core/patcher-ui/payload/codex-native-patcher-settings.js",
@@ -16,6 +17,8 @@ const SOURCE_PATHS = [
   "scripts/feature-registry.cjs",
   "scripts/codex-launcher.ps1",
   "scripts/codex-update-policy.psm1",
+  "scripts/check-remote-update-channel.cjs",
+  "scripts/generate-update-channel.cjs",
   "scripts/ensure-current-codex-patch.ps1",
   "scripts/codex-all-chats-shim.cjs",
   "scripts/codex-responses-chat-proxy.cjs",

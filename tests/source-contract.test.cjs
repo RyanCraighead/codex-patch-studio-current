@@ -6,6 +6,7 @@ const { spawnSync } = require("node:child_process");
 
 const root = path.resolve(__dirname, "..");
 const { findEmbeddedUpstreamAnchors } = require("../scripts/check-source-only.cjs");
+const { patcherFingerprint } = require("../scripts/patcher-fingerprint.cjs");
 
 function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -131,8 +132,15 @@ test("current update workflow is one-shot and preserves the verified clone", () 
   assert.match(ensure, /Test-ConfiguredPatchedCodexRunning/);
   assert.match(launcher, /Resolve-CodexUpdatePolicy/);
   assert.match(launcher, /Show-CodexUpdatePrompt/);
+  assert.match(launcher, /Show-RepositoryUpdatePrompt/);
+  assert.match(ensure, /check-remote-update-channel\.cjs/);
+  assert.match(ensure, /Remote channel checker exited/);
+  assert.match(ensure, /remoteChannelEnabled/);
+  assert.match(ensure, /channel-disabled/);
   assert.match(patcherUi, /state\.updatePolicy !== "off"/);
-  assert.match(patcherUi, /Checks are one-shot at launch/);
+  assert.match(patcherUi, /GitHub is force-refreshed only when you press Check now/);
+  assert.match(patcherUi, /refreshRemote: true/);
+  assert.match(server, /payload\?\.refreshRemote === true/);
   assert.doesNotMatch(server, /spawnSync/);
 });
 
@@ -191,6 +199,8 @@ test("native payload JavaScript parses", () => {
     "scripts/codex-responses-chat-proxy.cjs",
     "scripts/export-augment-webview-state.cjs",
     "scripts/resolve-listening-process.cjs",
+    "scripts/check-remote-update-channel.cjs",
+    "scripts/generate-update-channel.cjs",
     "scripts/verify-portable-payload.cjs",
     "scripts/verify-runtime-services.cjs",
   ]) {
@@ -206,4 +216,18 @@ test("compatibility contract records structural verification", () => {
   assert.ok(compatibility.requiredFeatures.includes("provider-and-model-picker"));
   assert.ok(compatibility.requiredFeatures.includes("orchestrations"));
   assert.ok(compatibility.requiredFeatures.includes("chat-imports"));
+  assert.ok(compatibility.requiredFeatures.includes("remote-update-channel"));
+});
+
+test("the committed GitHub update channel matches local compatibility metadata", () => {
+  const result = spawnSync(process.execPath, [path.join(root, "scripts", "generate-update-channel.cjs")], {
+    cwd: root,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const channel = JSON.parse(read("update-channel/stable.json"));
+  assert.equal(channel.channel, "stable");
+  assert.equal(channel.patcher.version, JSON.parse(read("package.json")).version);
+  assert.equal(channel.patcher.sourceSha256, patcherFingerprint(root).sha256);
 });

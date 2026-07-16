@@ -83,24 +83,26 @@ To put builds on another drive, create the ignored file `config/patcher.local.js
 
 ## Update Behavior
 
-The launcher compares four things before every launch:
+The launcher compares four local things before every launch:
 
 1. Installed Codex version.
 2. Installed package identity, location, and `app.asar` fingerprint.
 3. Generated clone, launcher metadata, and executable presence.
 4. Patcher source fingerprint.
 
+It can also consult the cached repository stable-channel manifest when that optional channel is enabled. The committed channel is disabled by default because this repository is private; manual **Check Codex + GitHub** remains available, and `manifestUrl` can be overridden with a reachable HTTPS endpoint.
+
 If nothing changed, launch is immediate. When Codex or patcher source changes, behavior follows the selected policy:
 
-- `Off`: launch the last verified clone without checking.
-- `Notify`: check once and ask before rebuilding. This is the recommended default.
-- `Auto rebuild`: check once and start a verified rebuild without prompting.
+- `Off`: launch the last verified clone without checking Codex or GitHub.
+- `Notify`: check once and ask before rebuilding. If the optional repository channel is enabled and reachable, it also reports a newer source release. This is the recommended default.
+- `Auto rebuild`: check once and start a locally verified Codex rebuild without prompting. Remote source is still never installed silently.
 
 Each candidate is built in a new directory while the known-good clone remains intact. The launcher config switches only after JavaScript, structural, and packed verification passes. If a running patched app needs to move to the new clone, only that old clone is stopped and relaunched; stock Codex remains open. Failed candidates never replace the last verified clone.
 
 Core modules currently use a tested `26.707.x` adapter family. Later numeric `26.707.*` Store revisions can rebuild automatically only if every structural and packed check still passes. A new Store family, an ambiguous anchor, or an overlapping adapter fails closed and leaves the last verified clone selected until a compatible adapter is added.
 
-Compatibility records in `config/compatibility.json` describe builds already validated by this repository; they do not pin the source build. See [Update Lifecycle](docs/UPDATE-LIFECYCLE.md).
+Compatibility records in `config/compatibility.json` describe builds already validated by this repository; they do not pin the source build. `update-channel/stable.json` is a source-only projection of those records that can be published at a reachable endpoint. When enabled, it is cached atomically, tolerates offline launches, and reports exact Codex and patcher-source fingerprint matches rather than trusting a numeric "supports up to" version. See [Update Lifecycle](docs/UPDATE-LIFECYCLE.md).
 
 ## Data Model
 
@@ -192,6 +194,8 @@ All bridges bind to loopback. API keys remain Windows user environment variables
 | `scripts/feature-registry.cjs` | Source-only feature discovery, resolution, restricted execution, and verification |
 | `scripts/feature-development-workflow.cjs` | Local/contribution worktrees, metadata, milestone commits, push, and draft PR workflow |
 | `scripts/codex-update-policy.psm1` | Tested Off, Notify, Auto, prompt, and failure decisions |
+| `scripts/check-remote-update-channel.cjs` | Cached GitHub source-release and exact Codex compatibility status |
+| `scripts/generate-update-channel.cjs` | Deterministic stable-channel generation and CI drift check |
 | `scripts/check-source-only.cjs` | Distribution, credential, and copied-source guard |
 | `scripts/ensure-current-codex-patch.ps1` | Update detection, patched-only stop, rebuild, relaunch |
 | `scripts/launch-patched-codex.ps1` | Isolated runtime initialization and service startup |
@@ -199,6 +203,8 @@ All bridges bind to loopback. API keys remain Windows user environment variables
 | `viewer/` | Multi-source import manager |
 | `codex-viewer/` | Codex project/chat and patch manager |
 | `config/compatibility.json` | Previously validated current-build fingerprints |
+| `config/update-channel.json` | Optional channel enablement, local revision, URL, timeout, and cache policy |
+| `update-channel/stable.json` | Publishable source-only compatibility and patcher release manifest |
 | `features/core/` | Independent built-in modules with manifests, tested version-family adapters, payloads, tests, and docs |
 | `features/community/` | Reviewable source-only contribution modules |
 | `.agents/skills/` | Local-feature and contribution authoring workflows |

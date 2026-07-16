@@ -55,6 +55,10 @@ test("portable package carries its runtime dependencies", () => {
   assert.match(packager, /"build-lock\.cjs"/);
   assert.match(packager, /"run-tests\.cjs"/);
   assert.match(packager, /"codex-update-policy\.psm1"/);
+  assert.match(packager, /"check-remote-update-channel\.cjs"/);
+  assert.match(packager, /"generate-update-channel\.cjs"/);
+  assert.match(packager, /"update-channel\.json"/);
+  assert.match(packager, /Join-Path \$RepoRoot "update-channel"/);
   assert.match(packager, /"verify-portable-payload\.cjs"/);
   assert.match(packager, /"verify-current-patched-build\.cjs"/);
   assert.match(packager, /"verify-runtime-services\.cjs"/);
@@ -63,6 +67,10 @@ test("portable package carries its runtime dependencies", () => {
   const payloadVerifier = read("scripts/verify-portable-payload.cjs");
   for (const dependency of [
     "codex-update-policy.psm1",
+    "check-remote-update-channel.cjs",
+    "generate-update-channel.cjs",
+    "update-channel.json",
+    "stable.json",
     "atomic-json.cjs",
     "build-lock.cjs",
     "feature-development-workflow.cjs",

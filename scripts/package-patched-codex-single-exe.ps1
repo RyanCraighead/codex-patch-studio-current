@@ -313,6 +313,8 @@ $runtimeScripts = @(
   "codex-launcher.ps1",
   "launch-patched-codex.ps1",
   "codex-update-policy.psm1",
+  "check-remote-update-channel.cjs",
+  "generate-update-channel.cjs",
   "initialize-patched-codex-home.ps1",
   "start-codex-provider-proxies.ps1",
   "start-codex-import-manager.ps1",
@@ -404,7 +406,7 @@ Copy-Item `
 
 $payloadConfigDir = Join-Path $payloadRoot "config"
 New-Item -ItemType Directory -Force -Path $payloadConfigDir | Out-Null
-foreach ($configName in @("patcher.json", "compatibility.json")) {
+foreach ($configName in @("patcher.json", "compatibility.json", "update-channel.json")) {
   $sourceConfig = Join-Path $RepoRoot "config\$configName"
   if (-not (Test-Path -LiteralPath $sourceConfig)) {
     throw "Required patcher config missing: $sourceConfig"
@@ -441,6 +443,11 @@ Invoke-RobocopyChecked `
 Invoke-RobocopyChecked `
   -Source (Join-Path $RepoRoot "features") `
   -Target (Join-Path $payloadRoot "features") `
+  -ExcludeFiles @("*.log")
+
+Invoke-RobocopyChecked `
+  -Source (Join-Path $RepoRoot "update-channel") `
+  -Target (Join-Path $payloadRoot "update-channel") `
   -ExcludeFiles @("*.log")
 
 $fingerprintNode = @(

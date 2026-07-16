@@ -2276,12 +2276,14 @@ function powershellExecutable() {
   return exists(systemPowerShell) ? systemPowerShell : "powershell.exe";
 }
 
-function checkCurrentCodexUpdate() {
+function checkCurrentCodexUpdate(refreshRemote = false) {
   const scriptPath = path.join(rootDir, "scripts", "ensure-current-codex-patch.ps1");
+  const arguments_ = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-CheckOnly", "-Quiet"];
+  if (refreshRemote) arguments_.push("-RefreshRemote");
   return new Promise((resolve, reject) => {
     const child = spawn(
       powershellExecutable(),
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-CheckOnly", "-Quiet"],
+      arguments_,
       { cwd: rootDir, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
     );
     let stdout = "";
@@ -2578,8 +2580,8 @@ async function handleApi(request, requestUrl, response) {
     return;
   }
   if (request.method === "POST" && requestUrl.pathname === "/api/patch/update/check") {
-    await readRequestJson(request);
-    sendJson(response, await checkCurrentCodexUpdate());
+    const payload = await readRequestJson(request);
+    sendJson(response, await checkCurrentCodexUpdate(payload?.refreshRemote === true));
     return;
   }
   if (request.method === "POST" && requestUrl.pathname === "/api/patch/update/apply") {

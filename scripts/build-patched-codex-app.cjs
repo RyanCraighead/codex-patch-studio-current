@@ -2772,6 +2772,7 @@ function main() {
     limit: options.limit,
     features,
     featureModules: featureModuleCatalog,
+    packedVerification,
     builtAt: new Date().toISOString(),
     sourceMode,
     cloneBaseName: cloneName,

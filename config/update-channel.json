@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "channel": "stable",
+  "localRevision": 1,
+  "manifestUrl": "https://raw.githubusercontent.com/RyanCraighead/codex-patch-studio-current/main/update-channel/stable.json",
+  "repositoryUrl": "https://github.com/RyanCraighead/codex-patch-studio-current",
+  "requestTimeoutMs": 2500,
+  "cacheTtlSeconds": 21600
+}

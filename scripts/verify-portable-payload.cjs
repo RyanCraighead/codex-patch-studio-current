@@ -84,6 +84,8 @@ required(path.join("node_modules", "classic-level", "package.json"));
 required(path.join("node_modules", "ws", "package.json"));
 required(path.join("scripts", "launch-patched-codex.ps1"));
 required(path.join("scripts", "codex-update-policy.psm1"));
+required(path.join("scripts", "check-remote-update-channel.cjs"));
+required(path.join("scripts", "generate-update-channel.cjs"));
 required(path.join("scripts", "atomic-json.cjs"));
 required(path.join("scripts", "build-lock.cjs"));
 required(path.join("scripts", "feature-development-workflow.cjs"));
@@ -96,6 +98,8 @@ required(path.join("scripts", "verify-current-ui.cjs"));
 required(path.join("scripts", "resolve-listening-process.cjs"));
 required(path.join("scripts", "export-augment-webview-state.cjs"));
 required(path.join("features", "core", "provider-suite", "payload", "codex-native-provider-settings.js"));
+required(path.join("config", "update-channel.json"));
+required(path.join("update-channel", "stable.json"));
 
 const expectedInstallerSfxSha256 =
   "e1e9aa1eb9fe7f331de76479154ac4bb9998c8919dbc79bebe4f6eaa795ce312";
