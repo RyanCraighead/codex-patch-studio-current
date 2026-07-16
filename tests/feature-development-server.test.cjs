@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { spawn } = require("node:child_process");
+const { once } = require("node:events");
 
 const root = path.resolve(__dirname, "..");
 
@@ -75,10 +76,10 @@ function request(port, options = {}) {
   });
 }
 
-function startServer(profileRoot, extraEnv = {}) {
+function startServer(profileRoot, extraEnv = {}, serverRoot = root) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [path.join(root, "codex-viewer", "server.cjs"), "0"], {
-      cwd: root,
+    const child = spawn(process.execPath, [path.join(serverRoot, "codex-viewer", "server.cjs"), "0"], {
+      cwd: serverRoot,
       env: {
         ...process.env,
         HOME: profileRoot,
@@ -117,6 +118,30 @@ function startServer(profileRoot, extraEnv = {}) {
       }
     });
   });
+}
+
+function writeJson(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+function createBundledServerRoot(profileRoot) {
+  const serverRoot = path.join(profileRoot, "bundled-runtime");
+  for (const relativePath of [
+    path.join("codex-viewer", "server.cjs"),
+    path.join("scripts", "feature-registry.cjs"),
+    path.join("config", "patcher.json"),
+  ]) {
+    const target = path.join(serverRoot, relativePath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(root, relativePath), target);
+  }
+  fs.cpSync(
+    path.join(root, "features", "core", "settings-shell"),
+    path.join(serverRoot, "features", "core", "settings-shell"),
+    { recursive: true },
+  );
+  return serverRoot;
 }
 
 test("Feature Development bridge is origin-guarded and returns actionable module state", async (context) => {
@@ -166,8 +191,11 @@ test("Feature Development bridge is origin-guarded and returns actionable module
   const { child, port, output } = await startServer(profileRoot, {
     CODEX_PATCH_STUDIO_LAUNCHER_CONFIG: launcherConfig,
   });
-  context.after(() => {
-    child.kill();
+  context.after(async () => {
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, "exit");
+    }
     fs.rmSync(profileRoot, { recursive: true, force: true });
   });
 
@@ -269,4 +297,134 @@ test("Feature Development bridge is origin-guarded and returns actionable module
   });
   assert.equal(injectedPath.status, 400);
   assert.match(injectedPath.body, /Unsupported Feature Development field\(s\): worktree/);
+});
+
+test("bundled Feature Development status uses preserved provenance and fails closed on evidence drift", async (context) => {
+  const profileRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-feature-development-bundle-"));
+  const serverRoot = createBundledServerRoot(profileRoot);
+  const codexExe = path.join(serverRoot, "app", "ChatGPT.exe");
+  const launcherPath = path.join(serverRoot, "codex-launcher.local.json");
+  const patchManifestPath = path.join(serverRoot, "patch-manifest.json");
+  const bundleSourcePath = path.join(serverRoot, "bundle-source.json");
+  const completeMarkerPath = path.join(serverRoot, ".bundle-complete.json");
+  const bundleId = "portable-feature-development-test";
+  const payloadSha256 = "f".repeat(64);
+  const patcherSha256 = "c".repeat(64);
+  const sourceProvenance = {
+    repository: "https://example.invalid/org/portable-source.git",
+    commit: "d".repeat(40),
+    branch: null,
+    dirty: true,
+  };
+  const featureModuleApplication = [{
+    id: "core.settings-shell",
+    result: { ok: true, evidence: "portable-apply" },
+  }];
+  const packedVerification = {
+    featureModules: [{
+      id: "core.settings-shell",
+      verification: [{ matched: true, evidence: "portable-pack" }],
+    }],
+  };
+  const launcher = {
+    mode: "bundled-self-extracting",
+    sourceMode: "bundled-snapshot",
+    bundleId,
+    cloneRoot: serverRoot,
+    codexExe,
+    sourceVersion: "26.707.9981.0",
+    sourceAsarSha256: "a".repeat(64),
+    patchedAppAsarSha256: "e".repeat(64),
+    sourceAppServerCliSha256: "b".repeat(64),
+    patcherSource: { sha256: patcherSha256 },
+    sourceProvenance,
+    builtAt: "2026-07-16T00:00:00.000Z",
+    featureModules: [{ id: "core.settings-shell", enabled: true }],
+    featureModuleApplication,
+    packedVerification,
+  };
+  const patchManifest = {
+    ...launcher,
+    candidateFinalizedAt: "2026-07-16T00:01:00.000Z",
+    payloadSha256,
+  };
+  const bundleSource = {
+    bundleId,
+    patcherSource: launcher.patcherSource,
+    sourceProvenance,
+    featureModuleApplication,
+    packedVerification,
+  };
+  fs.mkdirSync(path.dirname(codexExe), { recursive: true });
+  fs.writeFileSync(codexExe, "portable executable placeholder");
+  writeJson(launcherPath, launcher);
+  writeJson(patchManifestPath, patchManifest);
+  writeJson(bundleSourcePath, bundleSource);
+  writeJson(completeMarkerPath, { bundleId, payloadSha256 });
+
+  const { child, port, output } = await startServer(profileRoot, {}, serverRoot);
+  context.after(async () => {
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, "exit");
+    }
+    fs.rmSync(profileRoot, { recursive: true, force: true });
+  });
+
+  const readStatus = async () => {
+    const response = await request(port, {
+      headers: { origin: "app://-", "sec-fetch-site": "cross-site" },
+    });
+    assert.equal(response.status, 200, output());
+    return JSON.parse(response.body);
+  };
+  const assertRejectedEvidence = (status) => {
+    const settingsShell = status.modules.find((feature) => feature.id === "core.settings-shell");
+    assert.equal(settingsShell.build.status, "unknown");
+    assert.equal(settingsShell.test.status, "unknown");
+    assert.equal(status.lastBuild, null);
+  };
+
+  const accepted = await readStatus();
+  const settingsShell = accepted.modules.find((feature) => feature.id === "core.settings-shell");
+  assert.deepEqual(
+    {
+      repository: settingsShell.source.repository,
+      commit: settingsShell.source.commit,
+      branch: settingsShell.source.branch,
+      dirty: settingsShell.source.dirty,
+    },
+    sourceProvenance,
+  );
+  assert.equal(settingsShell.built, true);
+  assert.equal(settingsShell.build.status, "passed");
+  assert.equal(settingsShell.build.detail, '{"ok":true,"evidence":"portable-apply"}');
+  assert.equal(settingsShell.test.status, "passed");
+  assert.equal(settingsShell.test.detail, '[{"matched":true,"evidence":"portable-pack"}]');
+  assert.equal(accepted.lastBuild.id, `direct-${patcherSha256}`);
+  assert.equal(accepted.lastBuild.status, "passed");
+
+  writeJson(patchManifestPath, {
+    ...patchManifest,
+    sourceProvenance: { ...sourceProvenance, commit: "e".repeat(40) },
+  });
+  assertRejectedEvidence(await readStatus());
+
+  writeJson(patchManifestPath, {
+    ...patchManifest,
+    featureModuleApplication: [{ id: "core.settings-shell", result: { ok: true, evidence: "drift" } }],
+  });
+  assertRejectedEvidence(await readStatus());
+
+  writeJson(patchManifestPath, {
+    ...patchManifest,
+    packedVerification: {
+      featureModules: [{ id: "core.settings-shell", verification: [{ matched: true, evidence: "drift" }] }],
+    },
+  });
+  assertRejectedEvidence(await readStatus());
+
+  writeJson(patchManifestPath, patchManifest);
+  writeJson(completeMarkerPath, { bundleId: "wrong-bundle", payloadSha256 });
+  assertRejectedEvidence(await readStatus());
 });

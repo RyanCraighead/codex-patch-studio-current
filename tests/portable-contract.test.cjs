@@ -148,6 +148,16 @@ test("portable payload uses long-path-safe verified extraction", () => {
   assert.match(packager, /featureModuleApplication = \$featureModuleApplication/);
   assert.match(packager, /featureModuleApplication = \$sourceManifest\.featureModuleApplication/);
   assert.match(packager, /featureModuleApplication = \$manifest\.featureModuleApplication/);
+  assert.match(packager, /\$sourcePatchManifestPath = Join-Path \$sourceCloneRoot "patch-manifest\.json"/);
+  assert.match(packager, /\$featureModuleApplication = @\(\$sourcePatchManifest\.featureModuleApplication\)/);
+  assert.match(packager, /Source patch manifest identity does not match the promoted launcher configuration/);
+  assert.match(packager, /Source patch manifest is missing per-feature application evidence/);
+  assert.match(packager, /git -C \$RepoRoot remote get-url origin/);
+  assert.match(packager, /IsPathRooted\(\$remote\)/);
+  for (const field of ["UserName", "Password", "Query", "Fragment"]) {
+    assert.match(packager, new RegExp(`\\$builder\\.${field} = ""`));
+  }
+  assert.match(packager, /status --porcelain --untracked-files=normal/);
   assert.match(packager, /packedVerification = \$config\.packedVerification/);
   assert.match(packager, /packedVerification = \$sourceManifest\.packedVerification/);
   assert.match(packager, /packedVerification = \$manifest\.packedVerification/);
@@ -164,6 +174,16 @@ test("portable payload uses long-path-safe verified extraction", () => {
   assert.match(payloadVerifier, /assertFeatureEvidence\(sourceManifest\)/);
   assert.match(payloadVerifier, /runtimeLauncher\.sourceProvenance/);
   assert.match(payloadVerifier, /runtimeLauncher\.featureModuleApplication/);
+  assert.match(payloadVerifier, /invalid or duplicate feature evidence/);
+  assert.match(payloadVerifier, /missing application evidence for enabled feature/);
+  assert.match(
+    payloadVerifier,
+    /JSON\.stringify\(runtimeLauncher\.sourceProvenance\) !== JSON\.stringify\(sourceManifest\.sourceProvenance\)/,
+  );
+  assert.match(
+    payloadVerifier,
+    /JSON\.stringify\(runtimeLauncher\.featureModuleApplication\) !== JSON\.stringify\(sourceManifest\.featureModuleApplication\)/,
+  );
   assert.match(read("scripts/verify-runtime-services.cjs"), /CODEX_PATCHED_LAUNCHER_CONFIG/);
 });
 

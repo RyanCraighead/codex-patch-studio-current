@@ -1697,7 +1697,8 @@ function verifiedPatchManifest(launcher) {
       JSON.stringify(launcherProvenance) !== JSON.stringify(bundledProvenance) ||
       String(bundleSourceManifest?.patcherSource?.sha256 || "") !== launcherPatcherSha ||
       JSON.stringify(bundleSourceManifest?.featureModuleApplication) !==
-        JSON.stringify(manifest?.featureModuleApplication)
+        JSON.stringify(manifest?.featureModuleApplication) ||
+      JSON.stringify(bundleSourceManifest?.packedVerification) !== JSON.stringify(manifest?.packedVerification)
     ) {
       return null;
     }
