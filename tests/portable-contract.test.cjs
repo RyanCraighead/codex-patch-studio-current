@@ -68,15 +68,22 @@ test("portable package pins the verified installer SFX module", () => {
 test("portable payload uses long-path-safe verified extraction", () => {
   const packager = read("scripts/package-patched-codex-single-exe.ps1");
   const innerCompression = packager.slice(
-    packager.indexOf("$innerSevenZipArgs"),
-    packager.indexOf("& $sevenZip @innerSevenZipArgs"),
+    packager.indexOf("$compressionProfiles"),
+    packager.indexOf("$payloadHash = Get-Sha256Hex"),
   );
 
   assert.match(packager, /codex-patched-payload\.7z/);
   assert.match(innerCompression, /"-m0=lzma2"/);
-  assert.match(innerCompression, /"-md=64m"/);
-  assert.match(innerCompression, /"-mmt=2"/);
+  assert.match(innerCompression, /"-mx=1"/);
+  assert.match(innerCompression, /"-md=32m"/);
+  assert.match(innerCompression, /"-mmt=1"/);
+  assert.match(innerCompression, /name = "store-fallback"/);
+  assert.match(innerCompression, /"-mx=0"/);
   assert.doesNotMatch(innerCompression, /"-mmt=on"/);
+  assert.match(innerCompression, /@\(& \$sevenZip "t" \$payloadArchive 2>&1\)/);
+  assert.match(innerCompression, /\$compressionLogsRoot = Join-Path \$workRoot "logs"/);
+  assert.match(innerCompression, /payload-compression-\{0\}\.log/);
+  assert.match(innerCompression, /if \(-not \$compressionSucceeded\)/);
   assert.match(packager, /extractorSha256/);
   assert.match(packager, /Bundled payload extraction failed/);
   assert.doesNotMatch(packager, /Compress-Archive/);

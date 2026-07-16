@@ -483,19 +483,56 @@ $sevenZip = Find-SevenZipTool
 $sevenZipSfx = Find-SevenZipSfx
 $bundledSevenZip = Join-Path $sfxRoot "7z.exe"
 Copy-Item -LiteralPath $sevenZip -Destination $bundledSevenZip -Force
-$innerSevenZipArgs = @(
-  "a",
-  "-t7z",
-  "-mx=5",
-  "-m0=lzma2",
-  "-md=64m",
-  "-mmt=2",
-  $payloadArchive,
-  (Join-Path $payloadRoot "*")
+$compressionProfiles = @(
+  [pscustomobject]@{
+    name = "fast-lzma2"
+    args = @("-mx=1", "-m0=lzma2", "-md=32m", "-mmt=1")
+  },
+  [pscustomobject]@{
+    name = "store-fallback"
+    args = @("-mx=0", "-mmt=1")
+  }
 )
-& $sevenZip @innerSevenZipArgs | Out-Null
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $payloadArchive)) {
-  throw "7-Zip payload compression failed with exit code $LASTEXITCODE."
+
+$compressionSucceeded = $false
+$compressionProfileName = $null
+$compressionFailureSummaries = @()
+$compressionLogsRoot = Join-Path $workRoot "logs"
+New-Item -ItemType Directory -Force -Path $compressionLogsRoot | Out-Null
+foreach ($profile in $compressionProfiles) {
+  if (Test-Path -LiteralPath $payloadArchive) {
+    Remove-Item -LiteralPath $payloadArchive -Force
+  }
+
+  $compressionLogPath = Join-Path $compressionLogsRoot ("payload-compression-{0}.log" -f $profile.name)
+  $compressionTestLogPath = Join-Path $compressionLogsRoot ("payload-compression-{0}-test.log" -f $profile.name)
+  $innerSevenZipArgs = @("a", "-t7z") + @($profile.args) + @(
+    $payloadArchive,
+    (Join-Path $payloadRoot "*")
+  )
+  $compressionOutput = @(& $sevenZip @innerSevenZipArgs 2>&1)
+  $compressionExitCode = $LASTEXITCODE
+  $compressionOutput | ForEach-Object { $_.ToString() } | Set-Content -LiteralPath $compressionLogPath -Encoding UTF8
+
+  if ($compressionExitCode -eq 0 -and (Test-Path -LiteralPath $payloadArchive -PathType Leaf)) {
+    $compressionTestOutput = @(& $sevenZip "t" $payloadArchive 2>&1)
+    $compressionTestExitCode = $LASTEXITCODE
+    $compressionTestOutput | ForEach-Object { $_.ToString() } | Set-Content -LiteralPath $compressionTestLogPath -Encoding UTF8
+    if ($compressionTestExitCode -eq 0) {
+      $compressionSucceeded = $true
+      $compressionProfileName = [string]$profile.name
+      break
+    }
+    $compressionFailureSummaries += "$($profile.name): integrity test exit $compressionTestExitCode; log $compressionTestLogPath"
+  } else {
+    $compressionFailureSummaries += "$($profile.name): compression exit $compressionExitCode; log $compressionLogPath"
+  }
+
+  Write-Warning "7-Zip profile '$($profile.name)' failed. Retrying with the next safe profile."
+}
+
+if (-not $compressionSucceeded) {
+  throw "7-Zip payload compression failed. $($compressionFailureSummaries -join '; ')"
 }
 $payloadHash = Get-Sha256Hex -Path $payloadArchive
 $extractorHash = Get-Sha256Hex -Path $bundledSevenZip
@@ -522,6 +559,7 @@ $manifest = [ordered]@{
   catalogShim = $sourceManifest.catalogShim
   shareChatDatabaseWithStock = $sourceManifest.shareChatDatabaseWithStock
   portableElectronProfile = $sourceManifest.portableElectronProfile
+  payloadCompressionProfile = $compressionProfileName
 }
 $manifestJson = $manifest | ConvertTo-Json -Depth 20
 Set-Content -LiteralPath $manifestPath -Value $manifestJson -Encoding UTF8
@@ -844,6 +882,7 @@ $result = [ordered]@{
   sourceDesktopExecutableName = Split-Path -Leaf $sourceCodexExe
   shareChatDatabaseWithStock = $shareChatDatabaseWithStock
   portableElectronProfile = $portableElectronProfileEnabled
+  payloadCompressionProfile = $compressionProfileName
   sfxMode = "7zip"
   profileMode = if ($portableElectronProfileEnabled) { "isolated-per-bundle" } else { "stable-local-app-data" }
 }
