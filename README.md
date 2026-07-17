@@ -39,31 +39,134 @@ The stock Codex installation is never edited in place.
 
 See [Features](docs/FEATURES.md) and [Architecture](docs/ARCHITECTURE.md) for the full breakdown.
 
-## Quick Start
+## How It Works
 
-Requirements:
+Codex Patch Studio is a launcher and local build system, not a replacement installer. It discovers the Codex version already installed from the Microsoft Store, copies that application into a user-controlled build directory, applies the selected source-only feature modules, verifies the result, and records the verified clone in an ignored local launcher file.
 
-- Windows 11 with the Microsoft Store Codex app installed.
-- Node.js 22 or newer and npm.
+```mermaid
+flowchart LR
+    A["Microsoft Store Codex"] --> B["Discover and fingerprint"]
+    B --> C["Copy into a new local build"]
+    D["Selected patch modules"] --> C
+    C --> E["Structural and packed verification"]
+    E --> F["Codex Patch Studio shortcut"]
+    F --> G["Separate patched Codex instance"]
+```
+
+The Store installation is never modified. A rebuild is created beside the previous known-good build, and the launcher switches only after verification succeeds. Generated clones, local configuration, credentials, and chats are never committed to this repository.
+
+## Install And First Run
+
+### 1. Install the requirements
+
+- Windows 11 with the Microsoft Store Codex app installed and working.
+- [Git for Windows](https://git-scm.com/download/win).
+- Node.js 22 or newer, including npm.
 - PowerShell 5.1 or PowerShell 7.
-- Enough free space for a cloned Codex application. Use a secondary drive when the system drive is constrained.
+- Enough free space for a second local copy of Codex.
+
+Because this repository is private, the GitHub account used by Git or GitHub CLI must have access to it.
+
+### 2. Clone and install the patcher
+
+Open PowerShell in the directory where the source repository should live:
 
 ```powershell
 git clone git@github.com:RyanCraighead/codex-patch-studio-current.git
-cd codex-patch-studio-current
+Set-Location .\codex-patch-studio-current
+npm ci
+```
+
+An authenticated HTTPS clone works as well:
+
+```powershell
+git clone https://github.com/RyanCraighead/codex-patch-studio-current.git
+```
+
+### 3. Optionally put generated builds on another drive
+
+The default build directory is `%LOCALAPPDATA%\CodexPatchStudioCurrent\builds`. To use another drive, create the ignored file `config/patcher.local.json` before setup:
+
+```json
+{
+  "outputRoot": "E:\\CodexPatchStudioCurrent\\builds"
+}
+```
+
+Do not commit this machine-specific file.
+
+### 4. Build and create the launcher
+
+Run this from the repository directory:
+
+```powershell
+npm run setup
+```
+
+Setup performs the following actions:
+
+1. Detects and fingerprints the newest installed Codex Store package.
+2. Asks for an update policy: `Off`, `Notify`, or `Auto rebuild`. `Notify` is recommended.
+3. Resolves and validates the enabled patch modules.
+4. Builds and verifies a new immutable patched clone.
+5. Writes ignored machine-local launcher metadata.
+6. Creates `Codex Patch Studio Current.lnk` on the desktop.
+
+The first patched launch initializes `%USERPROFILE%\.codex-patch-studio-current`, starts the required loopback services, and opens the verified clone.
+
+## Launching Both Codex Instances
+
+Stock Codex and patched Codex are separate application instances and can run at the same time.
+
+| Instance | How to launch it | Configuration | Chats |
+| --- | --- | --- | --- |
+| Stock Codex | Use the normal **Codex** entry in the Windows Start menu, taskbar, or Microsoft Store installation. | `%USERPROFILE%\.codex\config.toml` | Canonical stock sessions and database |
+| Patched Codex | Double-click **Codex Patch Studio Current** on the desktop, or run `npm run launch:codex` from this repository. | `%USERPROFILE%\.codex-patch-studio-current\config.toml` | Shared stock sessions and database by default |
+
+Launching the patched shortcut stops only an older patched instance before reopening it. It does not stop stock Codex. Launch stock Codex normally first or afterward; the order does not matter.
+
+Always launch the patched version through its shortcut or `npm run launch:codex`. Do not run a generated clone's `Codex.exe` directly. Direct execution bypasses the update check, isolated environment variables, provider proxies, import manager, patch manager, and all-chats catalog shim.
+
+## Everyday Use
+
+1. Launch normal Codex from its normal Windows icon when you want the unmodified application.
+2. Launch **Codex Patch Studio Current** when you want patched settings, providers, orchestration, imports, routing, personas, or the expanded chat catalog.
+3. Configure patched-only behavior from the added pages under **Settings**. Changes there use the patched Codex home and do not overwrite stock `config.toml`.
+4. Keep the source checkout on disk. The desktop shortcut targets its launcher scripts and cannot operate after the repository is moved or deleted.
+5. When Codex updates, use the launch-time prompt. A failed rebuild leaves the last verified clone selected.
+
+## Common Commands
+
+Run these from the repository directory:
+
+| Command | Purpose |
+| --- | --- |
+| `npm run setup` | First setup, update-policy selection, verified build, and desktop shortcut creation |
+| `npm run launch:codex` | Launch the managed patched instance while leaving stock Codex alone |
+| `npm run check:current` | Compare installed Codex, patcher source, and the selected verified build without changing anything |
+| `npm run update:current` | Force a new verified build from the currently installed Codex package |
+| `npm run shortcut:codex` | Recreate the desktop shortcut after it was deleted or the icon changed |
+| `npm run features:list` | List discovered core, community, and local feature modules |
+| `npm run features:validate` | Validate feature manifests, dependencies, adapters, and conflicts |
+| `npm run check:source-only` | Confirm that no generated Codex material, credentials, or user data entered Git |
+| `npm test` | Run the repository test suite |
+| `npm run test:live` | Verify the locally selected patched build |
+| `npm run bundle:codex` | Create a local-only self-extracting package from the verified clone |
+
+To update the patcher source itself:
+
+```powershell
+git switch main
+git pull --ff-only
 npm ci
 npm run setup
 ```
 
-`npm run setup` asks how installed Codex updates should be handled, builds the current clone, and creates `Codex Patch Studio Current.lnk` on the desktop. `Notify` is recommended: the shortcut performs one check at launch and asks before rebuilding.
+The patcher never silently replaces its own source checkout. Launch-time remote checks can report a newer source release, but the user still updates Git explicitly.
 
-To launch directly:
+## Local Bundle
 
-```powershell
-npm run launch:codex
-```
-
-To build a local self-extracting EXE after setup:
+After setup, this creates a self-extracting package for use on the same machine:
 
 ```powershell
 npm run bundle:codex
@@ -71,15 +174,23 @@ npm run bundle:codex
 
 The bundle is a local-only artifact containing the user's installed Codex copy. It must not be published, shared, committed, released, or uploaded.
 
-By default, bundle launches reuse the stable non-portable Electron profile at `%LOCALAPPDATA%\CodexPatchStudioCurrent\electron-user-data`. Pass `-PortableElectronProfile` (for example, `npm run bundle:codex -- -PortableElectronProfile`) to use an isolated per-bundle profile under `bundled-profiles\<bundle-id>\electron-user-data` instead.
+By default, bundle launches reuse the stable non-portable Electron profile at `%LOCALAPPDATA%\CodexPatchStudioCurrent\electron-user-data`. Pass `-PortableElectronProfile` to use an isolated per-bundle profile:
 
-To put builds on another drive, create the ignored file `config/patcher.local.json` before setup:
-
-```json
-{
-  "outputRoot": "E:\\CodexPatchStudioCurrent\\builds"
-}
+```powershell
+npm run bundle:codex -- -PortableElectronProfile
 ```
+
+## Basic Troubleshooting
+
+- **Desktop shortcut is missing:** run `npm run shortcut:codex`.
+- **Patched Codex reports an installed-version change:** accept the rebuild prompt or run `npm run update:current`.
+- **A rebuild fails:** the launcher keeps the last verified clone. Read `codex-launch-debug\patched-codex-launch.log`, then run `npm run check:current` for the recorded reasons.
+- **Patched settings or local bridges are unavailable:** close only the patched window and relaunch it through the patched shortcut so its services start again.
+- **Stock and patched settings affect each other:** verify that patched Codex was started through the managed launcher and that `CODEX_HOME` resolves to `%USERPROFILE%\.codex-patch-studio-current` in its diagnostics.
+- **Chats are missing from one instance:** do not delete `%USERPROFILE%\.codex`. That is the canonical chat archive. Run `npm run test:live` and use the patched Imports/repair tools after making a backup.
+- **The repository was moved:** run `npm run setup` from the new path to rebuild the shortcut and local launcher metadata.
+
+For deeper update diagnostics, see [Update Lifecycle](docs/UPDATE-LIFECYCLE.md). For package boundaries and portability, see [Portable Builds](docs/PORTABLE.md).
 
 ## Update Behavior
 
