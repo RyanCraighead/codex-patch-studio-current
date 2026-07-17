@@ -3,7 +3,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { catalogFingerprint, discoverFeatureModules } = require("./feature-registry.cjs");
+const { canonicalSourceBytes, catalogFingerprint, discoverFeatureModules } = require("./feature-registry.cjs");
 
 const SOURCE_PATHS = [
   "config/compatibility.json",
@@ -51,7 +51,7 @@ function patcherFingerprint(rootDir) {
     const content = fs.readFileSync(filePath);
     hash.update(relativePath.replace(/\\/g, "/"));
     hash.update("\0");
-    hash.update(content);
+    hash.update(canonicalSourceBytes(relativePath, content));
     hash.update("\0");
     files.push(relativePath);
   }

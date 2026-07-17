@@ -1,11 +1,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const root = path.resolve(__dirname, "..");
 const { findEmbeddedUpstreamAnchors } = require("../scripts/check-source-only.cjs");
+const { canonicalSourceBytes, hashDirectory } = require("../scripts/feature-registry.cjs");
+const { normalizeManifestText } = require("../scripts/generate-update-channel.cjs");
 const { patcherFingerprint } = require("../scripts/patcher-fingerprint.cjs");
 
 function read(relativePath) {
@@ -220,14 +223,56 @@ test("compatibility contract records structural verification", () => {
 });
 
 test("the committed GitHub update channel matches local compatibility metadata", () => {
-  const result = spawnSync(process.execPath, [path.join(root, "scripts", "generate-update-channel.cjs")], {
+  const checker = path.join(root, "scripts", "generate-update-channel.cjs");
+  const result = spawnSync(process.execPath, [checker], {
     cwd: root,
     encoding: "utf8",
     windowsHide: true,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
+  const ciResult = spawnSync(process.execPath, [checker], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, GITHUB_SHA: "f".repeat(40), GITEA_COMMIT: "e".repeat(40) },
+    windowsHide: true,
+  });
+  assert.equal(ciResult.status, 0, ciResult.stderr || ciResult.stdout);
   const channel = JSON.parse(read("update-channel/stable.json"));
   assert.equal(channel.channel, "stable");
   assert.equal(channel.patcher.version, JSON.parse(read("package.json")).version);
   assert.equal(channel.patcher.sourceSha256, patcherFingerprint(root).sha256);
+});
+
+test("source fingerprints normalize text line endings while preserving binary bytes", () => {
+  assert.equal(normalizeManifestText("{\r\n  \"ok\": true\r\n}\r\n"), "{\n  \"ok\": true\n}\n");
+  assert.deepEqual(
+    canonicalSourceBytes("payload/example.js", Buffer.from("const value = 1;\r\n", "utf8")),
+    canonicalSourceBytes("payload/example.js", Buffer.from("const value = 1;\n", "utf8")),
+  );
+
+  const binary = Buffer.from([0x00, 0x0d, 0x0a, 0x80, 0xff]);
+  assert.deepEqual(canonicalSourceBytes("tools/launcher.sfx", binary), binary);
+
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-source-fingerprint-"));
+  const lfRoot = path.join(tempRoot, "lf");
+  const crlfRoot = path.join(tempRoot, "crlf");
+  try {
+    for (const directory of [lfRoot, crlfRoot]) {
+      fs.mkdirSync(path.join(directory, "payload"), { recursive: true });
+    }
+    fs.writeFileSync(path.join(lfRoot, "feature.json"), "{\n  \"id\": \"example\"\n}\n", "utf8");
+    fs.writeFileSync(path.join(crlfRoot, "feature.json"), "{\r\n  \"id\": \"example\"\r\n}\r\n", "utf8");
+    fs.writeFileSync(path.join(lfRoot, "payload", "index.js"), "module.exports = true;\n", "utf8");
+    fs.writeFileSync(path.join(crlfRoot, "payload", "index.js"), "module.exports = true;\r\n", "utf8");
+    fs.writeFileSync(path.join(lfRoot, "payload", ".gitkeep"), "\n", "utf8");
+    fs.writeFileSync(path.join(crlfRoot, "payload", ".gitkeep"), "\r\n", "utf8");
+    fs.writeFileSync(path.join(lfRoot, "payload", "launcher.sfx"), binary);
+    fs.writeFileSync(path.join(crlfRoot, "payload", "launcher.sfx"), binary);
+
+    assert.equal(hashDirectory(lfRoot), hashDirectory(crlfRoot));
+    fs.writeFileSync(path.join(crlfRoot, "payload", "launcher.sfx"), Buffer.concat([binary, Buffer.from([0x01])]));
+    assert.notEqual(hashDirectory(lfRoot), hashDirectory(crlfRoot));
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
 });

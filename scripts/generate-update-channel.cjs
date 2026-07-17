@@ -44,14 +44,22 @@ function stableJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
-module.exports = { buildChannelManifest, stableJson };
+function normalizeManifestText(value) {
+  return String(value || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+}
+
+module.exports = { buildChannelManifest, normalizeManifestText, stableJson };
 
 if (require.main === module) {
   const rootDir = path.resolve(__dirname, "..");
   const arguments_ = process.argv.slice(2);
   const write = arguments_.includes("--write");
   const commitIndex = arguments_.indexOf("--commit");
-  const commit = commitIndex >= 0 ? arguments_[commitIndex + 1] : process.env.GITHUB_SHA || process.env.GITEA_COMMIT || "";
+  const commit = commitIndex >= 0
+    ? arguments_[commitIndex + 1]
+    : write
+      ? process.env.GITHUB_SHA || process.env.GITEA_COMMIT || ""
+      : "";
   const { manifest, outputPath } = buildChannelManifest(rootDir, {
     commit,
     publishedAt: write ? new Date().toISOString() : undefined,
@@ -62,7 +70,7 @@ if (require.main === module) {
     fs.writeFileSync(outputPath, expected, "utf8");
     process.stdout.write(`${outputPath}\n`);
   } else {
-    const actual = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, "utf8").replace(/^\uFEFF/, "") : "";
+    const actual = fs.existsSync(outputPath) ? normalizeManifestText(fs.readFileSync(outputPath, "utf8")) : "";
     if (actual !== expected) {
       process.stderr.write("The committed update channel does not match package and compatibility metadata. Run npm run channel:write.\n");
       process.exitCode = 1;

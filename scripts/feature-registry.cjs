@@ -18,6 +18,36 @@ const FEATURE_RECEIPT_SCHEMA_VERSION = 1;
 const FEATURE_RECEIPT_DIRECTORY = "codex-patch-studio/features";
 const ADAPTER_VM_TIMEOUT_MS = 5000;
 const MAX_ADAPTER_BRIDGE_REQUESTS = 256;
+const NORMALIZED_TEXT_EXTENSIONS = new Set([
+  ".bat",
+  ".cjs",
+  ".cmd",
+  ".cs",
+  ".css",
+  ".csv",
+  ".html",
+  ".ini",
+  ".js",
+  ".json",
+  ".jsonl",
+  ".jsx",
+  ".md",
+  ".mjs",
+  ".ps1",
+  ".psd1",
+  ".psm1",
+  ".py",
+  ".sh",
+  ".svg",
+  ".toml",
+  ".ts",
+  ".tsx",
+  ".txt",
+  ".xml",
+  ".yaml",
+  ".yml",
+]);
+const NORMALIZED_TEXT_BASENAMES = new Set([".gitattributes", ".gitignore", ".gitkeep", ".npmrc"]);
 const FORBIDDEN_MODULE_EXTENSIONS = new Set([
   ".asar",
   ".appx",
@@ -108,13 +138,24 @@ function walkFiles(rootPath, options = {}) {
   return files;
 }
 
+function canonicalSourceBytes(relativePath, content) {
+  const buffer = Buffer.isBuffer(content) ? content : Buffer.from(content);
+  const sourcePath = String(relativePath || "");
+  const isText = NORMALIZED_TEXT_EXTENSIONS.has(path.extname(sourcePath).toLowerCase()) ||
+    NORMALIZED_TEXT_BASENAMES.has(path.basename(sourcePath).toLowerCase());
+  if (!isText) {
+    return buffer;
+  }
+  return Buffer.from(buffer.toString("utf8").replace(/\r\n?/g, "\n"), "utf8");
+}
+
 function hashDirectory(rootPath) {
   const hash = crypto.createHash("sha256");
   for (const filePath of walkFiles(rootPath, { excludeDevelopmentDirectories: false })) {
     const relativePath = path.relative(rootPath, filePath).replace(/\\/g, "/");
     hash.update(relativePath);
     hash.update("\0");
-    hash.update(fs.readFileSync(filePath));
+    hash.update(canonicalSourceBytes(relativePath, fs.readFileSync(filePath)));
     hash.update("\0");
   }
   return hash.digest("hex");
@@ -1535,6 +1576,7 @@ function cli(argv) {
 module.exports = {
   FEATURE_API_VERSION,
   adapterRelativePath,
+  canonicalSourceBytes,
   matchesCodexVersionSelector,
   applyFeatureModules,
   catalogFingerprint,
@@ -1543,6 +1585,7 @@ module.exports = {
   configuredRoots,
   createPatchContext,
   discoverFeatureModules,
+  hashDirectory,
   publicFeatureRecord,
   resolveFeatureModules,
   resolveInside,
