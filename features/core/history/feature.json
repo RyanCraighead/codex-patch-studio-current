@@ -5,12 +5,34 @@
   "description": "Loads the complete lightweight task catalog through a tokenized loopback app-server proxy while leaving older conversation bodies lazy until opened.",
   "version": "2.0.0",
   "kind": "core",
-  "implementation": "builtin",
+  "implementation": "module",
   "enabledByDefault": true,
   "legacyFeatureIds": ["catalogShim"],
   "dependencies": [],
   "conflicts": [],
-  "permissions": ["runtime:loopback-app-server-proxy", "read:shared-chat-catalog"],
-  "verification": [],
+  "supports": { "codexVersions": ["26.707.x"] },
+  "structuralAnchors": [
+    {
+      "id": "thread-list-protocol",
+      "path": "webview/assets/app-server-manager-signals-*.js",
+      "includes": "sendRequest(`thread/list`",
+      "cardinality": { "exact": 4 }
+    }
+  ],
+  "runtime": {
+    "permissions": ["patch:asar", "runtime:loopback-app-server-proxy", "read:shared-chat-catalog"],
+    "localPorts": [
+      { "name": "all-chats-shim", "port": 47851, "protocol": "tcp", "host": "127.0.0.1" }
+    ]
+  },
+  "native": { "settings": [], "sidebar": [] },
+  "verification": [
+    {
+      "id": "module-receipt",
+      "path": "codex-patch-studio/features/core.history.json",
+      "includes": "core.history",
+      "cardinality": { "exact": 1 }
+    }
+  ],
   "distribution": { "upstreamArtifacts": "forbidden" }
 }

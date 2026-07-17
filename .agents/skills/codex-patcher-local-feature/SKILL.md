@@ -5,25 +5,21 @@ description: Create or modify a private Codex Patch Studio feature for personal 
 
 # Codex Patcher Local Feature
 
-Build personal feature modules without placing them in the public patcher repository or copying Codex application code.
+Build personal source-only feature modules on local-only Git branches without changing `main` or publishing by default.
 
 ## Workflow
 
-1. Locate the Codex Patch Studio repository and read `docs/FEATURE-DEVELOPMENT.md`.
-2. Determine scope:
-   - For an ordinary patch module, use `%USERPROFILE%\.codex-patch-studio-current\features`.
-   - For framework changes, create a dedicated `codex/local-<slug>` worktree from a clean committed baseline.
-3. Keep local modules in their own local Git repository. Initialize it if needed, create `local/<slug>`, and do not add a remote unless the user explicitly asks.
-4. Scaffold with:
-   `node scripts/feature-registry.cjs scaffold --kind local --id local.<slug>`
-5. Implement through the restricted module context only. Do not read installed files directly from module code, use `require`, access `process`, or include copied/minified Codex source.
-6. Add synthetic tests. Never commit extracted ASAR contents, application binaries, chat databases, credentials, logs, or generated clones.
-7. Validate from the patcher repository:
-   - `npm run features:validate`
-   - `npm run check:source-only`
-   - `npm test`
-8. If the installed Codex build is available, run the verified packed build. Record only version, hashes, match counts, and pass/fail evidence.
-9. Commit coherent checkpoints to the local feature repository. Do not push or open a pull request by default.
+1. Locate Codex Patch Studio and read `docs/FEATURE-WORKFLOWS.md`, `docs/FEATURE-DEVELOPMENT.md`, and `SECURITY.md`.
+2. Determine the exact installed Codex version, source-ASAR SHA-256, app-server CLI SHA-256, and a namespaced ID such as `local.<slug>`.
+3. From a clean committed baseline, invoke the executable workflow:
+   `node scripts/feature-development-workflow.cjs start --mode local --feature local.<slug> --slug <slug> --codex-version <version> --source-asar-sha256 <64-hex-sha256> --source-cli-sha256 <64-hex-sha256>`
+4. Continue only in the returned `local/<slug>` worktree. The command has already scaffolded a versioned adapter through the feature registry and committed the scaffold checkpoint.
+5. If runtime discovery is needed, ask before pointing ignored local config at the worktree's `features/local` directory. Never commit local config.
+6. Implement through restricted context helpers. Do not read installed files directly from module code, use `require` or `process` in an adapter, or include copied/minified Codex source.
+7. Add synthetic tests. Never commit extracted ASAR contents, application binaries, chat databases, credentials, logs, or generated clones.
+8. Use `checkpoint` for `first-successful-patch`, `packed-verification`, `runtime-ui-validation`, and `docs`, in that order. The first checkpoint runs module tests. Packed and runtime/UI checkpoints require module-relative structured evidence JSON with the exact feature/version/fingerprints and store its SHA-256; runtime/UI may be N/A only with `--not-applicable --note <reason>`. The docs checkpoint validates the module README.
+9. Run `status` and the repository validation commands before finishing, and do not add a remote, push, or open a pull request unless the user explicitly requests that action.
+10. When the user decides to upstream the feature, use `convert --feature <publisher>.<slug>` so a fresh `contrib/<slug>` worktree is created from the recorded baseline.
 
 ## Safety
 
@@ -31,5 +27,6 @@ Build personal feature modules without placing them in the public patcher reposi
 - Treat zero or multiple structural matches as a hard failure.
 - Keep the feature disabled until its unpacked and packed verification passes.
 - Ask before changing shared user config, installing dependencies, or publishing anything.
+- Local mode never pushes or opens a PR. `start`, `checkpoint`, and `convert` are local operations; use `convert` before any contribution publication workflow.
 
 Read [references/checklist.md](references/checklist.md) before the final validation pass.

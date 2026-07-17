@@ -18,6 +18,34 @@ function Get-ImportManagerHealth {
   }
 }
 
+function Get-Sha256Hex {
+  param([string]$Path)
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      return ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace "-", "").ToLowerInvariant()
+    } finally {
+      $sha.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
+function Test-ImportManagerReady {
+  param([object]$Health, [string]$ExpectedSourceSha256, [string]$ExpectedRuntimeRoot)
+  return (
+    $null -ne $Health -and
+    $Health.ok -eq $true -and
+    [string]$Health.service -eq "codex-import-manager" -and
+    [string]$Health.sourceSha256 -eq $ExpectedSourceSha256 -and
+    [string]$Health.runtimeRoot -and
+    [System.IO.Path]::GetFullPath([string]$Health.runtimeRoot).TrimEnd('\') -ieq
+      [System.IO.Path]::GetFullPath($ExpectedRuntimeRoot).TrimEnd('\')
+  )
+}
+
 function Stop-StaleImportManager {
   $connections = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
   foreach ($connection in $connections) {
@@ -36,7 +64,9 @@ if (-not (Test-Path -LiteralPath $ViewerScript)) {
   throw "Codex import manager server not found: $ViewerScript"
 }
 
-if (Get-ImportManagerHealth) {
+$expectedSourceSha256 = Get-Sha256Hex -Path $ViewerScript
+
+if (Test-ImportManagerReady -Health (Get-ImportManagerHealth) -ExpectedSourceSha256 $expectedSourceSha256 -ExpectedRuntimeRoot $RepoRoot) {
   return
 }
 
@@ -44,7 +74,7 @@ Stop-StaleImportManager
 Start-Sleep -Milliseconds 250
 
 $healthAfterStop = Get-ImportManagerHealth
-if ($healthAfterStop) {
+if (Test-ImportManagerReady -Health $healthAfterStop -ExpectedSourceSha256 $expectedSourceSha256 -ExpectedRuntimeRoot $RepoRoot) {
   return
 }
 
@@ -69,7 +99,7 @@ Start-Process `
 
 for ($i = 0; $i -lt 20; $i++) {
   Start-Sleep -Milliseconds 250
-  if (Get-ImportManagerHealth) {
+  if (Test-ImportManagerReady -Health (Get-ImportManagerHealth) -ExpectedSourceSha256 $expectedSourceSha256 -ExpectedRuntimeRoot $RepoRoot) {
     return
   }
 }

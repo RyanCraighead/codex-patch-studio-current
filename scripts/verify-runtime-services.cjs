@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const WebSocket = require("ws");
+const { resolveListeningProcess } = require("./resolve-listening-process.cjs");
 
 const root = path.resolve(__dirname, "..");
 const requireProviderKeys = process.argv.includes("--require-provider-keys");
@@ -26,6 +27,19 @@ function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
+function sameHash(left, right) {
+  return Boolean(left && right) && String(left).toLowerCase() === String(right).toLowerCase();
+}
+
+function samePath(left, right) {
+  if (!left || !right) return false;
+  const normalizedLeft = path.resolve(String(left));
+  const normalizedRight = path.resolve(String(right));
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
 async function getJson(name, url) {
   const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
   if (!response.ok) fail(`${name} returned HTTP ${response.status}: ${url}`);
@@ -35,28 +49,55 @@ async function getJson(name, url) {
   return response.json();
 }
 
+async function getRendererJson(name, url) {
+  const response = await fetch(url, {
+    headers: { Origin: "app://-" },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) fail(`${name} returned HTTP ${response.status}: ${url}`);
+  if (response.headers.get("access-control-allow-origin") !== "app://-") {
+    fail(`${name} did not restrict its renderer CORS header to app://-.`);
+  }
+  return response.json();
+}
+
 async function waitForCatalogShim(launcher, timeoutMs = 60_000) {
-  const port = Number(launcher.catalogShim?.basePort || 47851);
+  const basePort = Number(launcher.catalogShim?.basePort || 47851);
+  const portRange = 50;
+  const expectedSourceSha256 = sha256(path.join(root, "scripts", "codex-all-chats-shim.cjs"));
+  const expectedUpstreamCli = launcher.catalogShim?.upstreamCli;
+  const expectedCliSha256 = launcher.sourceAppServerCliSha256;
+  const expectedMaxThreads = Number(launcher.catalogShim?.maxThreads || 10000);
   const deadline = Date.now() + timeoutMs;
   let health = null;
   while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/health`, {
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (response.ok) {
-        health = await response.json();
-        if (health.ok === true && health.expansions >= 1 && health.lastCatalogCount >= 1) return health;
-      }
-    } catch {}
+    for (let port = basePort; port < basePort + portRange; port += 1) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/health`, {
+          signal: AbortSignal.timeout(1_000),
+        });
+        if (!response.ok) continue;
+        const candidate = await response.json();
+        const matches =
+          candidate.ok === true &&
+          candidate.service === "codex-all-chats-shim" &&
+          sameHash(candidate.runtimeSourceSha256, expectedSourceSha256) &&
+          sameHash(candidate.upstreamCliSha256, expectedCliSha256) &&
+          samePath(candidate.upstreamCli, expectedUpstreamCli) &&
+          Number(candidate.maxThreads) === expectedMaxThreads;
+        if (!matches) continue;
+        health = candidate;
+        if (candidate.expansions >= 1 && candidate.lastCatalogCount >= 1) return candidate;
+      } catch {}
+    }
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   return health;
 }
 
-async function findPageTarget() {
+async function findPageTarget(desktopProcess) {
   let lastError;
-  for (const host of ["127.0.0.1", "localhost"]) {
+  for (const host of desktopProcess.hosts) {
     try {
       const response = await fetch(`http://${host}:${cdpPort}/json/list`, {
         signal: AbortSignal.timeout(5_000),
@@ -66,12 +107,15 @@ async function findPageTarget() {
       const target =
         targets.find((entry) => entry.type === "page" && entry.url === "app://-/index.html") ||
         targets.find((entry) => entry.type === "page");
-      if (target?.webSocketDebuggerUrl) return target;
+      if (target?.webSocketDebuggerUrl) return { host, target };
     } catch (error) {
       lastError = error;
     }
   }
-  throw lastError || new Error(`No Codex CDP target was found on port ${cdpPort}.`);
+  const detail = lastError?.message ? ` Last error: ${lastError.message}` : "";
+  throw new Error(
+    `Codex CDP is unavailable on port ${cdpPort}. Set CODEX_PATCHED_REMOTE_DEBUGGING_PORT=${cdpPort} and relaunch the patched app before running test:runtime.${detail}`,
+  );
 }
 
 async function evaluate(target, expression) {
@@ -146,6 +190,9 @@ async function main() {
     expandEnvironmentPath(launcher.sqliteHome || patchedHome),
   );
   const runtimeDb = path.join(runtimeSqliteHome, "state_5.sqlite");
+  const expectedImportManagerSha256 = sha256(path.join(root, "viewer", "server.cjs"));
+  const expectedPatchManagerSha256 = sha256(path.join(root, "codex-viewer", "server.cjs"));
+  const expectedProviderProxySha256 = sha256(path.join(root, "scripts", "codex-responses-chat-proxy.cjs"));
 
   for (const filePath of [launcher.codexExe, launcher.appAsar, stockConfig, patchedConfig, stockDb, runtimeDb]) {
     if (!filePath || !fs.existsSync(filePath)) fail(`Required runtime path is missing: ${filePath}`);
@@ -168,9 +215,15 @@ async function main() {
     fail("Configured stock chat database sharing is not active.");
   }
 
-  const [imports, patcher, ...providerHealth] = await Promise.all([
-    getJson("import manager", "http://127.0.0.1:4577/api/imports/status"),
+  const desktopProcess = resolveListeningProcess(cdpPort, {
+    expectedExecutablePath: launcher.codexExe,
+    expectedUserDataPath: launcher.electronUserDataPath,
+  });
+
+  const [imports, patcher, featureDevelopment, ...providerHealth] = await Promise.all([
+    getJson("import manager", "http://127.0.0.1:4577/api/health"),
     getJson("patch manager", "http://127.0.0.1:4590/api/patch/status"),
+    getRendererJson("feature development", "http://127.0.0.1:4590/api/patch/feature-development"),
     ...[
       ["deepseek", 47731],
       ["zai", 47732],
@@ -179,12 +232,43 @@ async function main() {
     ].map(async ([provider, port]) => {
       const health = await getJson(`${provider} proxy`, `http://127.0.0.1:${port}/health`);
       if (health.ok !== true || health.provider !== provider) fail(`${provider} proxy health is invalid.`);
+      if (!sameHash(health.sourceSha256, expectedProviderProxySha256)) {
+        fail(`${provider} proxy is running stale source code.`);
+      }
+      if (!samePath(health.runtimeRoot, root)) {
+        fail(`${provider} proxy belongs to a different patcher runtime.`);
+      }
       if (requireProviderKeys && health.hasApiKey !== true) fail(`${provider} API key is not available to its proxy.`);
-      return { provider, port, ok: health.ok === true, hasApiKey: health.hasApiKey === true };
+      return {
+        provider,
+        port,
+        ok: health.ok === true,
+        hasApiKey: health.hasApiKey === true,
+        sourceSha256: health.sourceSha256,
+        runtimeRoot: health.runtimeRoot,
+      };
     }),
   ]);
+  if (imports.ok !== true || imports.service !== "codex-import-manager") {
+    fail("Import manager health is invalid.");
+  }
+  if (!sameHash(imports.sourceSha256, expectedImportManagerSha256)) {
+    fail("Import manager is running stale source code.");
+  }
+  if (!samePath(imports.runtimeRoot, root)) {
+    fail("Import manager belongs to a different patcher runtime.");
+  }
+  if (!sameHash(patcher.patchManagerSourceSha256, expectedPatchManagerSha256)) {
+    fail("Patch manager is running stale source code.");
+  }
+  if (!samePath(patcher.runtimePaths?.repoRoot, root)) {
+    fail("Patch manager belongs to a different patcher runtime.");
+  }
+  if (featureDevelopment.ok !== true || !Array.isArray(featureDevelopment.modules)) {
+    fail("Feature Development bridge returned an invalid catalog.");
+  }
 
-  const target = await findPageTarget();
+  const { host: devToolsHost, target } = await findPageTarget(desktopProcess);
   const catalogShimEnabled = launcher.features?.catalogShim === true && launcher.catalogShim?.enabled === true;
   const catalogShim = catalogShimEnabled ? await waitForCatalogShim(launcher) : null;
   if (!catalogShimEnabled) await waitForHistoryHydration(target, Number(launcher.limit));
@@ -196,7 +280,8 @@ async function main() {
         providers: Boolean(globalThis.__codexNativeProviderSettings),
         orchestrator: Boolean(globalThis.__codexNativeOrchestrator),
         imports: Boolean(globalThis.__codexNativeImportSettings),
-        patcher: Boolean(globalThis.__codexNativePatcherSettings)
+        patcher: Boolean(globalThis.__codexNativePatcherSettings),
+        featureDevelopment: typeof globalThis.__codexNativePatcherSettings?.openSettingsRoute === 'function'
       },
       preloadInterceptor: typeof globalThis.electronBridge?.registerSendMessageInterceptor === 'function',
       historyHydration: globalThis.__codexPatchStudioHistoryHydration || null
@@ -212,6 +297,12 @@ async function main() {
     }
     if (String(catalogShim.upstreamCliSha256 || "").toLowerCase() !== String(launcher.sourceAppServerCliSha256 || "").toLowerCase()) {
       fail("All-chats catalog shim is not using the pinned app-server CLI.");
+    }
+    if (!sameHash(catalogShim.runtimeSourceSha256, sha256(path.join(root, "scripts", "codex-all-chats-shim.cjs")))) {
+      fail("All-chats catalog shim is running stale source code.");
+    }
+    if (!samePath(catalogShim.upstreamCli, launcher.catalogShim?.upstreamCli)) {
+      fail("All-chats catalog shim is running against a different clone path.");
     }
   } else if (
     !renderer.historyHydration ||
@@ -233,9 +324,18 @@ async function main() {
           asarSha256: launcher.sourceAsarSha256,
           manifestBuiltAt: manifest.builtAt,
         },
+        desktopProcess: {
+          port: cdpPort,
+          pid: desktopProcess.pid,
+          executablePath: desktopProcess.executablePath,
+          userDataPath: desktopProcess.userDataPath,
+          localAddress: desktopProcess.localAddress,
+          host: devToolsHost,
+        },
         services: {
-          importManager: { ok: Array.isArray(imports.statuses) },
+          importManager: { ok: imports.ok === true, service: imports.service },
           patchManager: { ok: Boolean(patcher.defaults && patcher.runtimePaths) },
+          featureDevelopment: { ok: true, modules: featureDevelopment.modules.length },
           catalogShim,
           providers: providerHealth,
         },

@@ -12,6 +12,21 @@ $ProxyScript = Join-Path $RepoRoot "scripts\codex-responses-chat-proxy.cjs"
 $LogPath = Join-Path $RepoRoot "codex-provider-proxy.log"
 $ModelCacheDir = Join-Path $RepoRoot "codex-provider-model-cache"
 
+function Get-Sha256Hex {
+  param([string]$Path)
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      return ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace "-", "").ToLowerInvariant()
+    } finally {
+      $sha.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 function Get-ProviderProxyHealth {
   param([string]$Url)
   try {
@@ -24,13 +39,19 @@ function Get-ProviderProxyHealth {
 function Test-ProviderProxyReady {
   param(
     [string]$Provider,
-    [int]$Port
+    [int]$Port,
+    [string]$ExpectedSourceSha256,
+    [string]$ExpectedRuntimeRoot
   )
   $health = Get-ProviderProxyHealth "http://127.0.0.1:$Port/health"
   return (
     $null -ne $health -and
     $health.ok -eq $true -and
     $health.provider -eq $Provider -and
+    [string]$health.sourceSha256 -eq $ExpectedSourceSha256 -and
+    [string]$health.runtimeRoot -and
+    [System.IO.Path]::GetFullPath([string]$health.runtimeRoot).TrimEnd('\') -ieq
+      [System.IO.Path]::GetFullPath($ExpectedRuntimeRoot).TrimEnd('\') -and
     $null -ne $health.features -and
     $health.features.envAdmin -eq $true -and
     $health.features.modelReasoningProfiles -eq $true -and
@@ -61,7 +82,7 @@ function Start-ResponsesProxy {
     [string]$EnvKey
   )
 
-  if (Test-ProviderProxyReady -Provider $Provider -Port $Port) {
+  if (Test-ProviderProxyReady -Provider $Provider -Port $Port -ExpectedSourceSha256 $script:ExpectedProxySourceSha256 -ExpectedRuntimeRoot $RepoRoot) {
     return
   }
 
@@ -116,13 +137,18 @@ function Start-ResponsesProxy {
 
   for ($i = 0; $i -lt 20; $i++) {
     Start-Sleep -Milliseconds 250
-    if (Test-ProviderProxyReady -Provider $Provider -Port $Port) {
+    if (Test-ProviderProxyReady -Provider $Provider -Port $Port -ExpectedSourceSha256 $script:ExpectedProxySourceSha256 -ExpectedRuntimeRoot $RepoRoot) {
       return
     }
   }
 
   throw "$Provider Responses proxy did not start on http://127.0.0.1:$Port. See $LogPath"
 }
+
+if (-not (Test-Path -LiteralPath $ProxyScript -PathType Leaf)) {
+  throw "Provider proxy runtime is missing: $ProxyScript"
+}
+$script:ExpectedProxySourceSha256 = Get-Sha256Hex -Path $ProxyScript
 
 Start-ResponsesProxy -Provider "deepseek" -Port $DeepSeekPort -EnvKey "DEEPSEEK_API_KEY"
 Start-ResponsesProxy -Provider "zai" -Port $ZaiPort -EnvKey "ZAI_API_KEY"

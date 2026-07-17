@@ -9,6 +9,8 @@ const { spawn } = require("child_process");
 const { DatabaseSync } = require("node:sqlite");
 const {
   catalogFingerprint,
+  compareVersion,
+  compatibleWith,
   discoverFeatureModules,
   publicFeatureRecord,
 } = require("../scripts/feature-registry.cjs");
@@ -21,13 +23,24 @@ const orchestrationRunsDir = path.join(orchestrationDir, "runs");
 const patchJobsDir = path.join(rootDir, "codex-patch-jobs");
 const patchLogsDir = path.join(patchJobsDir, "logs");
 const patchResultsDir = path.join(patchJobsDir, "results");
-const launcherConfigPath = path.join(rootDir, "codex-launcher.local.json");
+const featureWorkflowScriptPath = path.join(rootDir, "scripts", "feature-development-workflow.cjs");
+const communityFeatureRoot = path.join(rootDir, "features", "community");
+const launcherConfigPath = path.resolve(
+  process.env.CODEX_PATCH_STUDIO_LAUNCHER_CONFIG || path.join(rootDir, "codex-launcher.local.json")
+);
 const basePatcherConfigPath = path.join(rootDir, "config", "patcher.json");
 const localPatcherConfigPath = path.join(rootDir, "config", "patcher.local.json");
 const patchManagerSourceSha256 = crypto.createHash("sha256").update(fs.readFileSync(__filename)).digest("hex");
 const maxRequestBodyBytes = 1024 * 1024;
 const maxRolloutStatsBytes = 16 * 1024 * 1024;
 const maxRolloutDetailBytes = 8 * 1024 * 1024;
+const maxFeatureWorkflowOutputBytes = 128 * 1024;
+const featureActionResults = new Map();
+const featureActionInFlight = new Map();
+let activeFeatureActionId = null;
+let currentCodexUpdateSnapshot = null;
+const featureIdPattern = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/;
+const featureRequestIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{7,127}$/;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -40,10 +53,11 @@ const statCache = new Map();
 const statsCache = new Map();
 
 class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, details = null) {
     super(message);
     this.name = "HttpError";
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -72,7 +86,7 @@ function readJsonSafe(filePath) {
   }
 }
 
-function sendJson(response, value, status = 200) {
+function sendJson(response, value, status = 200, extraHeaders = {}) {
   const body = JSON.stringify(value, null, 2);
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
@@ -80,6 +94,7 @@ function sendJson(response, value, status = 200) {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
+    ...extraHeaders,
   });
   response.end(body);
 }
@@ -107,7 +122,7 @@ function sendCaughtError(response, error) {
     return;
   }
   if (error instanceof HttpError) {
-    sendError(response, error.status, error.message);
+    sendJson(response, { error: error.message, ...(error.details || {}) }, error.status);
     return;
   }
   if (error instanceof URIError) {
@@ -200,6 +215,74 @@ function assertSafePostRequest(request) {
   if (parsedOrigin.protocol !== "http:" || !loopbackOrigin || parsedOrigin.host.toLowerCase() !== requestHost) {
     throw new HttpError(403, "Cross-origin POST requests are not allowed.");
   }
+}
+
+function trustedFeatureDevelopmentOrigin(request) {
+  const requestHost = loopbackRequestHost(request);
+  const origin = String(request.headers.origin || "").trim();
+  const fetchSite = String(request.headers["sec-fetch-site"] || "").trim().toLowerCase();
+  if (origin.toLowerCase() === "app://-") {
+    return "app://-";
+  }
+  if (fetchSite === "cross-site") {
+    throw new HttpError(403, "Feature Development requests do not accept cross-site web origins.");
+  }
+
+  const candidate = origin || String(request.headers.referer || "").trim();
+  if (!candidate) {
+    throw new HttpError(403, "Feature Development requests require an approved Origin or Referer.");
+  }
+  let parsed = null;
+  try {
+    parsed = new url.URL(candidate);
+  } catch {
+    throw new HttpError(403, "Feature Development request origin is invalid.");
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (
+    parsed.protocol !== "http:" ||
+    !["127.0.0.1", "localhost", "::1"].includes(hostname) ||
+    parsed.host.toLowerCase() !== requestHost
+  ) {
+    throw new HttpError(403, "Feature Development requests must originate from this loopback bridge.");
+  }
+  return parsed.origin;
+}
+
+function assertFeatureDevelopmentRequest(request) {
+  const allowedOrigin = trustedFeatureDevelopmentOrigin(request);
+  if (request.method === "OPTIONS") {
+    const requestedMethod = String(request.headers["access-control-request-method"] || "").trim().toUpperCase();
+    const requestedHeaders = String(request.headers["access-control-request-headers"] || "")
+      .split(",")
+      .map((header) => header.trim().toLowerCase())
+      .filter(Boolean);
+    if (requestedMethod && !["GET", "POST"].includes(requestedMethod)) {
+      throw new HttpError(403, "Feature Development preflight requested an unsupported method.");
+    }
+    if (requestedHeaders.some((header) => header !== "content-type")) {
+      throw new HttpError(403, "Feature Development preflight requested unsupported headers.");
+    }
+  }
+  if (request.method === "POST") {
+    const contentType = String(request.headers["content-type"] || "")
+      .split(";", 1)[0]
+      .trim()
+      .toLowerCase();
+    if (contentType !== "application/json") {
+      throw new HttpError(415, "Feature Development commands require Content-Type: application/json.");
+    }
+  }
+  return allowedOrigin;
+}
+
+function featureDevelopmentCorsHeaders(allowedOrigin) {
+  return {
+    "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    Vary: "Origin",
+  };
 }
 
 function readFileSegment(filePath, start, length) {
@@ -1214,6 +1297,10 @@ const patchFeatureDefinitions = [
 
 function defaultPatchOptions() {
   const patcherConfig = mergedPatcherConfig();
+  const persistedBuildFeatures =
+    patcherConfig.buildFeatures && typeof patcherConfig.buildFeatures === "object" && !Array.isArray(patcherConfig.buildFeatures)
+      ? patcherConfig.buildFeatures
+      : {};
   const configuredOutputRoot = String(patcherConfig.outputRoot || path.join(rootDir, "build-output")).replace(
     /%([^%]+)%/g,
     (match, name) => process.env[name] || match
@@ -1227,7 +1314,14 @@ function defaultPatchOptions() {
     shortcutName: String(patcherConfig.shortcutName || "Codex Patch Studio Current"),
     shortcutDir: "",
     keepWork: false,
-    features: Object.fromEntries(patchFeatureDefinitions.map((feature) => [feature.id, feature.defaultEnabled])),
+    features: Object.fromEntries(
+      patchFeatureDefinitions.map((feature) => [
+        feature.id,
+        Object.prototype.hasOwnProperty.call(persistedBuildFeatures, feature.id)
+          ? persistedBuildFeatures[feature.id] !== false
+          : feature.defaultEnabled,
+      ])
+    ),
   };
 }
 
@@ -1373,6 +1467,364 @@ function parseLastJsonObject(text) {
   return null;
 }
 
+function expandEnvironmentPath(value) {
+  return String(value || "")
+    .replace(/%([^%]+)%/g, (match, name) => process.env[name] || match)
+    .replace(/^~(?=[\\/]|$)/, process.env.USERPROFILE || process.env.HOME || "~");
+}
+
+function isPathInside(parentPath, childPath) {
+  const parent = path.resolve(parentPath);
+  const child = path.resolve(childPath);
+  const relative = path.relative(parent, child);
+  return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
+}
+
+function readJsonBoundedSafe(filePath, maxBytes = 8 * 1024 * 1024) {
+  const stats = statSafe(filePath);
+  if (!stats?.isFile() || stats.size > maxBytes) return null;
+  return readJsonSafe(filePath);
+}
+
+function runGitText(cwd, args) {
+  return new Promise((resolve) => {
+    const child = spawn("git", ["-C", cwd, ...args], {
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        GCM_INTERACTIVE: "Never",
+      },
+      shell: false,
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(value);
+    };
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish("");
+    }, 5000);
+    child.stdout.on("data", (chunk) => {
+      if (Buffer.byteLength(stdout, "utf8") < 256 * 1024) stdout += chunk.toString();
+    });
+    child.once("error", () => finish(""));
+    child.once("close", (code) => finish(code === 0 ? stdout.trim() : ""));
+  });
+}
+
+function sanitizedRepositorySource(value, fallback) {
+  const source = String(value || "").trim();
+  if (!source) return fallback;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(source)) return source;
+  try {
+    const parsed = new url.URL(source);
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizedSourceProvenance(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const rawRepository = String(value.repository || "").trim();
+  const repository = sanitizedRepositorySource(rawRepository, "");
+  const remoteRepository =
+    (/^[a-z][a-z0-9+.-]*:\/\//i.test(repository) && !/^file:/i.test(repository)) ||
+    /^[^@\s/:]+@[^\s/:]+:[^\s]+$/.test(repository);
+  const commit = String(value.commit || "").trim().toLowerCase();
+  if (!remoteRepository || path.isAbsolute(repository) || !/^[a-f0-9]{40,64}$/.test(commit)) return null;
+  const branch = value.branch == null ? null : String(value.branch).trim();
+  if (branch && (branch.length > 256 || /[\u0000-\u001f]/.test(branch))) return null;
+  return {
+    repository,
+    commit,
+    branch: branch || null,
+    dirty: typeof value.dirty === "boolean" ? value.dirty : null,
+  };
+}
+
+async function sourceInfoForFeature(record, cache, fallbackProvenance = null) {
+  const cachedRoot = [...cache.keys()].find((candidate) => isPathInside(candidate, record.rootPath));
+  const candidateRoot = cachedRoot || (await runGitText(record.rootPath, ["rev-parse", "--show-toplevel"]));
+  const gitRoot = candidateRoot && isPathInside(candidateRoot, record.rootPath) ? path.resolve(candidateRoot) : "";
+  if (!gitRoot) {
+    const provenance = normalizedSourceProvenance(fallbackProvenance);
+    return {
+      repository: provenance?.repository || record.rootPath,
+      commit: provenance?.commit || null,
+      branch: provenance?.branch || null,
+      dirty: provenance?.dirty ?? null,
+      worktree: record.rootPath,
+      modulePath: record.rootPath,
+    };
+  }
+  let repositoryPromise = cache.get(gitRoot);
+  if (!repositoryPromise) {
+    repositoryPromise = Promise.all([
+      runGitText(gitRoot, ["remote", "get-url", "origin"]),
+      runGitText(gitRoot, ["rev-parse", "HEAD"]),
+      runGitText(gitRoot, ["branch", "--show-current"]),
+      runGitText(gitRoot, ["status", "--porcelain", "--untracked-files=normal"]),
+    ]).then(([remote, commit, branch, dirtyOutput]) => ({
+      repository: sanitizedRepositorySource(remote, gitRoot),
+      commit: commit || null,
+      branch: branch || null,
+      dirty: Boolean(dirtyOutput),
+      worktree: gitRoot,
+    }));
+    cache.set(gitRoot, repositoryPromise);
+  }
+  const repository = await repositoryPromise;
+  return {
+    ...repository,
+    modulePath: record.rootPath,
+  };
+}
+
+function compatibilityForFeature(record, sourceVersion) {
+  const versions = Array.isArray(record.manifest.supportedCodexVersions)
+    ? record.manifest.supportedCodexVersions
+    : Array.isArray(record.manifest.supports?.codexVersions)
+      ? record.manifest.supports.codexVersions
+      : [];
+  const minimum = record.manifest.supports?.minimumCodexVersion || null;
+  const maximum = record.manifest.supports?.maximumCodexVersion || null;
+  if (!sourceVersion) {
+    return { status: "unknown", sourceVersion: null, versions, minimum, maximum };
+  }
+  return {
+    status: compatibleWith(record, sourceVersion) ? "compatible" : "incompatible",
+    sourceVersion,
+    versions,
+    minimum,
+    maximum,
+  };
+}
+
+function featureEvidenceStatus(evidence, fallback) {
+  if (!evidence) return fallback;
+  const resultFailed = evidence.result && typeof evidence.result === "object" && evidence.result.ok === false;
+  const verificationFailed = Array.isArray(evidence.verification) && evidence.verification.some((item) => item?.matched === false);
+  if (resultFailed || verificationFailed) return "failed";
+  const verified =
+    evidence.receipt?.validated === true ||
+    evidence.receipt?.path ||
+    evidence.result?.ok === true ||
+    (Array.isArray(evidence.verification) && evidence.verification.length > 0 && evidence.verification.every((item) => item?.matched === true));
+  return verified ? "passed" : "unknown";
+}
+
+function featureEvidenceDetail(evidence, fallback) {
+  if (!evidence) return fallback;
+  const value = evidence.result ?? evidence.verification ?? null;
+  if (value == null) return "Completed without structured detail.";
+  const serialized = JSON.stringify(value);
+  return serialized.length > 320 ? `${serialized.slice(0, 317)}...` : serialized;
+}
+
+function verifiedPatchManifest(launcher) {
+  const cloneRoot = String(launcher?.cloneRoot || "").trim();
+  if (!cloneRoot || !path.isAbsolute(cloneRoot)) return null;
+  const samePath = (left, right) => {
+    if (!left || !right) return false;
+    const normalizedLeft = path.resolve(String(left));
+    const normalizedRight = path.resolve(String(right));
+    return process.platform === "win32"
+      ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+      : normalizedLeft === normalizedRight;
+  };
+  const bundleSourceManifest = readJsonBoundedSafe(path.join(rootDir, "bundle-source.json"));
+  const bundleCompleteMarker = readJsonBoundedSafe(path.join(rootDir, ".bundle-complete.json"));
+  const bundleId = String(launcher?.bundleId || "").trim();
+  const bundledSnapshot =
+    launcher?.mode === "bundled-self-extracting" &&
+    launcher?.sourceMode === "bundled-snapshot" &&
+    samePath(cloneRoot, rootDir) &&
+    Boolean(bundleId) &&
+    String(bundleSourceManifest?.bundleId || "") === bundleId &&
+    String(bundleCompleteMarker?.bundleId || "") === bundleId;
+  const configuredOutputRoot = path.resolve(defaultPatchOptions().outputRoot);
+  const launcherOutputRoot = expandEnvironmentPath(launcher?.outputRoot);
+  const approvedOutputRoots = [configuredOutputRoot];
+  if (launcherOutputRoot && path.isAbsolute(launcherOutputRoot)) {
+    approvedOutputRoots.push(path.resolve(launcherOutputRoot));
+  }
+  if (!bundledSnapshot && !approvedOutputRoots.some((outputRoot) => isPathInside(outputRoot, cloneRoot))) return null;
+
+  const launcherCodexExe = String(launcher?.codexExe || "").trim();
+  if (!launcherCodexExe || !path.isAbsolute(launcherCodexExe) || !isPathInside(cloneRoot, launcherCodexExe)) return null;
+  if (!statSafe(launcherCodexExe)?.isFile()) return null;
+
+  const manifest = readJsonBoundedSafe(path.join(cloneRoot, "patch-manifest.json"));
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return null;
+  if (!samePath(manifest.cloneRoot, cloneRoot) || !samePath(manifest.codexExe, launcherCodexExe)) return null;
+
+  const matchingFields = [
+    "mode",
+    "sourceMode",
+    "sourceVersion",
+    "sourceAsarSha256",
+    "patchedAppAsarSha256",
+    "sourceAppServerCliSha256",
+    "buildIdentity",
+  ];
+  if (
+    matchingFields.some(
+      (field) => launcher?.[field] != null && String(manifest?.[field] || "") !== String(launcher[field])
+    )
+  ) {
+    return null;
+  }
+  const launcherPatcherSha = String(launcher?.patcherSource?.sha256 || "").trim();
+  if (launcherPatcherSha && String(manifest?.patcherSource?.sha256 || "") !== launcherPatcherSha) return null;
+  if (bundledSnapshot) {
+    const launcherProvenance = normalizedSourceProvenance(launcher?.sourceProvenance);
+    const manifestProvenance = normalizedSourceProvenance(manifest?.sourceProvenance);
+    const bundledProvenance = normalizedSourceProvenance(bundleSourceManifest?.sourceProvenance);
+    if (
+      !launcherProvenance ||
+      JSON.stringify(launcherProvenance) !== JSON.stringify(manifestProvenance) ||
+      JSON.stringify(launcherProvenance) !== JSON.stringify(bundledProvenance) ||
+      String(bundleSourceManifest?.patcherSource?.sha256 || "") !== launcherPatcherSha ||
+      JSON.stringify(bundleSourceManifest?.featureModuleApplication) !==
+        JSON.stringify(manifest?.featureModuleApplication) ||
+      JSON.stringify(bundleSourceManifest?.packedVerification) !== JSON.stringify(manifest?.packedVerification)
+    ) {
+      return null;
+    }
+  }
+  return manifest;
+}
+
+function directVerifiedBuild(patchManifest) {
+  if (!patchManifest) return null;
+  const identity = String(patchManifest.buildIdentity || patchManifest.patcherSource?.sha256 || "verified")
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .slice(0, 80);
+  const builtAt = patchManifest.candidateFinalizedAt || patchManifest.builtAt || null;
+  return {
+    id: `direct-${identity}`,
+    status: "passed",
+    createdAt: patchManifest.builtAt || builtAt,
+    completedAt: builtAt,
+    exitCode: 0,
+    error: null,
+    logTail: "Verified immutable build manifest.",
+  };
+}
+
+function safePatchJobLog(job) {
+  const logPath = String(job?.logPath || "");
+  if (!logPath || !isPathInside(patchLogsDir, logPath)) return "";
+  return readLogTail(logPath, 12000);
+}
+
+async function featureDevelopmentStatus() {
+  try {
+    const config = mergedPatcherConfig();
+    const catalog = discoverFeatureModules(rootDir, config);
+    const configured = config.featureModules && typeof config.featureModules === "object" ? config.featureModules : {};
+    const launcher = readJsonSafe(launcherConfigPath);
+    const patchManifest = verifiedPatchManifest(launcher);
+    const latestBuildJob = listPatchJobs().find((job) => ["patch", "update"].includes(job?.type)) || null;
+    const sourceVersion =
+      currentCodexUpdateSnapshot?.installedVersion || launcher?.sourceVersion || latestBuildJob?.result?.sourceVersion || null;
+    const built = new Map(
+      Array.isArray(launcher?.featureModules) ? launcher.featureModules.map((feature) => [feature.id, feature]) : []
+    );
+    const application = new Map(
+      Array.isArray(patchManifest?.featureModuleApplication)
+        ? patchManifest.featureModuleApplication.map((result) => [result.id, result])
+        : []
+    );
+    const packed = new Map(
+      Array.isArray(patchManifest?.packedVerification?.featureModules)
+        ? patchManifest.packedVerification.featureModules.map((result) => [result.id, result])
+        : []
+    );
+    const buildDefaults = defaultPatchOptions().features;
+    const gitCache = new Map();
+    const sources = await Promise.all(
+      catalog.records.map((record) => sourceInfoForFeature(record, gitCache, launcher?.sourceProvenance))
+    );
+    const modules = catalog.records.map((record, index) => {
+      const legacyFeatureIds = Array.isArray(record.manifest.legacyFeatureIds) ? record.manifest.legacyFeatureIds : [];
+      const configuredEnabled = Object.prototype.hasOwnProperty.call(configured, record.id)
+        ? configured[record.id] !== false
+        : legacyFeatureIds.length
+          ? legacyFeatureIds.some((id) => buildDefaults[id] === true)
+          : record.manifest.enabledByDefault === true;
+      const builtRecord = built.get(record.id);
+      const builtEnabled = builtRecord?.enabled === true;
+      const applicationEvidence = application.get(record.id);
+      const packedEvidence = packed.get(record.id);
+      const buildFallback = builtEnabled ? "unknown" : configuredEnabled ? "pending" : "disabled";
+      const testFallback = builtEnabled ? "unknown" : "not-run";
+      return {
+        ...publicFeatureRecord(record, configuredEnabled),
+        configurable: record.kind !== "core" && record.manifest.implementation === "module",
+        legacyFeatureIds,
+        supports: {
+          codexVersions: Array.isArray(record.manifest.supportedCodexVersions)
+            ? record.manifest.supportedCodexVersions
+            : [],
+          minimumCodexVersion: record.manifest.supports?.minimumCodexVersion || null,
+          maximumCodexVersion: record.manifest.supports?.maximumCodexVersion || null,
+        },
+        built: builtEnabled,
+        compatibility: compatibilityForFeature(record, sourceVersion),
+        source: sources[index],
+        build: {
+          status: featureEvidenceStatus(applicationEvidence, buildFallback),
+          at: launcher?.builtAt || null,
+          detail: featureEvidenceDetail(applicationEvidence, builtEnabled ? "Included, but no per-feature application evidence was recorded." : "Not included in the last verified build."),
+        },
+        test: {
+          status: featureEvidenceStatus(packedEvidence, testFallback),
+          at: launcher?.builtAt || null,
+          detail: featureEvidenceDetail(packedEvidence, patchManifest ? "No per-feature packed verification evidence was recorded." : "No packed verification result is available."),
+        },
+      };
+    });
+    const localRoot = path.resolve(
+      expandEnvironmentPath(config.localFeatureRoot || "%USERPROFILE%\\.codex-patch-studio-current\\features")
+    );
+    return {
+      ok: true,
+      fingerprint: catalogFingerprint(catalog),
+      sourceVersion,
+      sourceAsarSha256: launcher?.sourceAsarSha256 || latestBuildJob?.result?.sourceAsarSha256 || null,
+      sourceCliSha256: launcher?.sourceAppServerCliSha256 || latestBuildJob?.result?.sourceAppServerCliSha256 || null,
+      localRoot,
+      communityRoot: communityFeatureRoot,
+      modules,
+      lastBuild: latestBuildJob
+        ? {
+            id: latestBuildJob.id,
+            status: latestBuildJob.status,
+            createdAt: latestBuildJob.createdAt,
+            completedAt: latestBuildJob.completedAt,
+            exitCode: latestBuildJob.exitCode,
+            error: latestBuildJob.error,
+            logTail: safePatchJobLog(latestBuildJob),
+          }
+        : directVerifiedBuild(patchManifest),
+    };
+  } catch (error) {
+    return { ok: false, error: error.message || String(error), modules: [] };
+  }
+}
+
 function patchStatus() {
   const launcherConfig = readJsonSafe(launcherConfigPath);
   const latestJob = listPatchJobs()[0] || null;
@@ -1449,6 +1901,397 @@ function saveFeatureModuleSelection(payload = {}) {
   return featureModuleStatus();
 }
 
+function validatedFeatureId(value, label, expectedKind = null) {
+  const id = String(value || "").trim();
+  if (id.length > 120 || !featureIdPattern.test(id)) {
+    throw new HttpError(400, `${label} must be a namespaced lowercase feature ID.`);
+  }
+  if (expectedKind === "local" && !id.startsWith("local.")) {
+    throw new HttpError(400, `${label} must start with local.`);
+  }
+  if (expectedKind === "contribution" && (id.startsWith("local.") || id.startsWith("core."))) {
+    throw new HttpError(400, `${label} must use a contribution namespace, not local. or core.`);
+  }
+  return id;
+}
+
+function validatedFeatureRequestId(value) {
+  const requestId = String(value || "").trim();
+  if (!featureRequestIdPattern.test(requestId)) {
+    throw new HttpError(400, "Feature Development commands require a valid one-shot requestId.");
+  }
+  return requestId;
+}
+
+function featureCatalogForAction() {
+  const config = mergedPatcherConfig();
+  const catalog = discoverFeatureModules(rootDir, config);
+  const localRoot = path.resolve(
+    expandEnvironmentPath(config.localFeatureRoot || "%USERPROFILE%\\.codex-patch-studio-current\\features")
+  );
+  return { config, catalog, localRoot };
+}
+
+function featureRecordForAction(catalog, id, expectedKind = null) {
+  const feature = catalog.byId.get(id);
+  if (!feature) throw new HttpError(404, `Unknown feature module: ${id}`);
+  if (expectedKind && feature.kind !== expectedKind) {
+    throw new HttpError(400, `${id} is not a ${expectedKind} feature module.`);
+  }
+  return feature;
+}
+
+function appendBoundedOutput(current, chunk) {
+  const remaining = maxFeatureWorkflowOutputBytes - Buffer.byteLength(current, "utf8");
+  if (remaining <= 0) return { value: current, truncated: true };
+  const buffer = Buffer.from(chunk);
+  if (buffer.length <= remaining) return { value: current + buffer.toString("utf8"), truncated: false };
+  return { value: current + buffer.subarray(0, remaining).toString("utf8"), truncated: true };
+}
+
+function outputLogLines(label, stdout, stderr, truncated) {
+  const lines = [`${label}: ${path.relative(rootDir, featureWorkflowScriptPath)} (fixed argv; shell disabled)`];
+  if (stdout.trim()) lines.push(...stdout.trim().split(/\r?\n/).slice(-80));
+  if (stderr.trim()) lines.push(...stderr.trim().split(/\r?\n/).slice(-80));
+  if (truncated) lines.push(`Output was truncated at ${maxFeatureWorkflowOutputBytes} bytes.`);
+  return lines;
+}
+
+function runFeatureSourceWorkflow(args, label, timeoutMs = 30000) {
+  if (!exists(featureWorkflowScriptPath)) {
+    throw new HttpError(500, `Feature source workflow is missing: ${featureWorkflowScriptPath}`);
+  }
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [featureWorkflowScriptPath, ...args], {
+      cwd: rootDir,
+      env: process.env,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    let truncated = false;
+    let settled = false;
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
+    const timeout = setTimeout(() => {
+      child.kill();
+      const logs = outputLogLines(label, stdout, stderr, truncated);
+      finish(() => reject(new HttpError(504, `${label} timed out.`, { logs })));
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      const next = appendBoundedOutput(stdout, chunk);
+      stdout = next.value;
+      truncated ||= next.truncated;
+    });
+    child.stderr.on("data", (chunk) => {
+      const next = appendBoundedOutput(stderr, chunk);
+      stderr = next.value;
+      truncated ||= next.truncated;
+    });
+    child.on("error", (error) => {
+      const logs = outputLogLines(label, stdout, `${stderr}\n${error.message}`, truncated);
+      finish(() => reject(new HttpError(500, `${label} could not start: ${error.message}`, { logs })));
+    });
+    child.on("close", (code) => {
+      const logs = outputLogLines(label, stdout, stderr, truncated);
+      if (code !== 0) {
+        const detail = (stderr || stdout || `exit code ${code}`).trim().split(/\r?\n/).slice(-1)[0];
+        finish(() => reject(new HttpError(409, `${label} failed: ${detail}`, { logs })));
+        return;
+      }
+      finish(() => resolve({ result: parseLastJsonObject(stdout), logs }));
+    });
+  });
+}
+
+async function validatedWorkflowWorktree(result, expectedMode, logs) {
+  const worktreeValue = String(result?.worktree || "").trim();
+  if (!worktreeValue || !path.isAbsolute(worktreeValue)) {
+    throw new HttpError(500, "The source workflow did not return an absolute worktree path.", { logs });
+  }
+  const worktree = path.resolve(worktreeValue);
+  if (!statSafe(worktree)?.isDirectory()) {
+    throw new HttpError(500, `The source workflow worktree does not exist: ${worktree}`, { logs });
+  }
+  const gitRoot = await runGitText(worktree, ["rev-parse", "--show-toplevel"]);
+  if (!gitRoot || comparablePath(gitRoot) !== comparablePath(worktree)) {
+    throw new HttpError(500, "The source workflow returned a path that is not a Git worktree root.", { logs });
+  }
+  const expectedPrefix = expectedMode === "local" ? "local/" : "contrib/";
+  if (result?.mode !== expectedMode || !String(result?.branch || "").startsWith(expectedPrefix)) {
+    throw new HttpError(500, `The source workflow returned invalid ${expectedMode} metadata.`, { logs });
+  }
+  return worktree;
+}
+
+async function createLocalFeature(id) {
+  const snapshot = await featureDevelopmentStatus();
+  if (!snapshot.ok) throw new HttpError(409, snapshot.error || "Feature catalog is invalid.");
+  if (!snapshot.sourceVersion) {
+    throw new HttpError(409, "Build patched Codex once before creating a feature so its exact compatibility version is known.");
+  }
+  if (!/^[0-9a-f]{64}$/i.test(String(snapshot.sourceAsarSha256 || "")) || !/^[0-9a-f]{64}$/i.test(String(snapshot.sourceCliSha256 || ""))) {
+    throw new HttpError(409, "The verified Codex source fingerprints are unavailable. Rebuild patched Codex before creating a feature.");
+  }
+  const workflow = await runFeatureSourceWorkflow(
+    [
+      "start",
+      "--json",
+      "--mode",
+      "local",
+      "--feature",
+      id,
+      "--codex-version",
+      snapshot.sourceVersion,
+      "--source-asar-sha256",
+      snapshot.sourceAsarSha256,
+      "--source-cli-sha256",
+      snapshot.sourceCliSha256,
+      "--repo",
+      rootDir,
+    ],
+    `Create local feature workflow ${id}`,
+    120000
+  );
+  const worktree = await validatedWorkflowWorktree(workflow.result, "local", workflow.logs);
+  if (workflow.result?.feature !== id) {
+    throw new HttpError(500, "The source workflow returned the wrong local feature ID.", { logs: workflow.logs });
+  }
+  const relativeFeatureRoot = String(workflow.result?.featureRoot || "").trim();
+  const featureRoot = path.resolve(worktree, relativeFeatureRoot);
+  if (!relativeFeatureRoot || path.isAbsolute(relativeFeatureRoot) || !isPathInside(worktree, featureRoot) || !exists(path.join(featureRoot, "feature.json"))) {
+    throw new HttpError(500, "The source workflow returned an invalid local feature root.", { logs: workflow.logs });
+  }
+  const local = readJsonSafe(localPatcherConfigPath) || {};
+  const merged = mergedPatcherConfig();
+  const featureRoots = [
+    ...(Array.isArray(merged.featureRoots) ? merged.featureRoots : []),
+    ...(Array.isArray(local.featureRoots) ? local.featureRoots : []),
+  ].filter((entry, index, entries) => {
+    const value = typeof entry === "string" ? entry : entry?.path;
+    if (!value) return false;
+    return entries.findIndex((candidate) => {
+      const candidateValue = typeof candidate === "string" ? candidate : candidate?.path;
+      return candidateValue && comparablePath(expandEnvironmentPath(candidateValue)) === comparablePath(expandEnvironmentPath(value));
+    }) === index;
+  });
+  if (!featureRoots.some((entry) => {
+    const value = typeof entry === "string" ? entry : entry?.path;
+    return value && comparablePath(expandEnvironmentPath(value)) === comparablePath(featureRoot);
+  })) {
+    featureRoots.push({ path: featureRoot, kind: "local" });
+  }
+  const featureModules = {
+    ...(merged.featureModules && typeof merged.featureModules === "object" && !Array.isArray(merged.featureModules) ? merged.featureModules : {}),
+    ...(local.featureModules && typeof local.featureModules === "object" && !Array.isArray(local.featureModules) ? local.featureModules : {}),
+    [id]: true,
+  };
+  writeJsonFile(localPatcherConfigPath, { ...local, featureRoots, featureModules });
+  return {
+    message: `Created and registered ${id} in dedicated worktree ${worktree}.`,
+    logs: workflow.logs,
+    worktree,
+    workflow: workflow.result,
+    status: await featureDevelopmentStatus(),
+  };
+}
+
+async function convertLocalFeature(id, targetId) {
+  const { catalog } = featureCatalogForAction();
+  const sourceRecord = featureRecordForAction(catalog, id, "local");
+  const source = await sourceInfoForFeature(sourceRecord, new Map());
+  const sourceWorktree = path.resolve(source.worktree || sourceRecord.rootPath);
+  const gitRoot = await runGitText(sourceWorktree, ["rev-parse", "--show-toplevel"]);
+  if (!gitRoot || comparablePath(gitRoot) !== comparablePath(sourceWorktree) || !isPathInside(sourceWorktree, sourceRecord.rootPath)) {
+    throw new HttpError(409, `${id} is not inside a valid local feature workflow worktree.`);
+  }
+  const workflow = await runFeatureSourceWorkflow(
+    ["convert", "--json", "--feature", targetId, "--worktree", sourceWorktree],
+    `Convert ${id} to contribution ${targetId}`,
+    120000
+  );
+  const worktree = await validatedWorkflowWorktree(workflow.result, "contribution", workflow.logs);
+  if (workflow.result?.feature !== targetId) {
+    throw new HttpError(500, "The source workflow returned the wrong contribution feature ID.", { logs: workflow.logs });
+  }
+  const relativeFeatureRoot = String(workflow.result?.featureRoot || "").trim();
+  const featureRoot = path.resolve(worktree, relativeFeatureRoot);
+  if (
+    !relativeFeatureRoot ||
+    path.isAbsolute(relativeFeatureRoot) ||
+    !isPathInside(worktree, featureRoot) ||
+    !exists(path.join(featureRoot, "feature.json"))
+  ) {
+    throw new HttpError(500, "The source workflow returned an invalid contribution feature root.", { logs: workflow.logs });
+  }
+  const local = readJsonSafe(localPatcherConfigPath) || {};
+  const merged = mergedPatcherConfig();
+  const featureRoots = [
+    ...(Array.isArray(merged.featureRoots) ? merged.featureRoots : []),
+    ...(Array.isArray(local.featureRoots) ? local.featureRoots : []),
+  ].filter((entry, index, entries) => {
+    const value = typeof entry === "string" ? entry : entry?.path;
+    if (!value) return false;
+    return entries.findIndex((candidate) => {
+      const candidateValue = typeof candidate === "string" ? candidate : candidate?.path;
+      return candidateValue && comparablePath(expandEnvironmentPath(candidateValue)) === comparablePath(expandEnvironmentPath(value));
+    }) === index;
+  });
+  if (!featureRoots.some((entry) => {
+    const value = typeof entry === "string" ? entry : entry?.path;
+    return value && comparablePath(expandEnvironmentPath(value)) === comparablePath(featureRoot);
+  })) {
+    featureRoots.push({ path: featureRoot, kind: "contribution" });
+  }
+  writeJsonFile(localPatcherConfigPath, { ...local, featureRoots });
+  return {
+    message: `Converted and registered ${id} as ${targetId} in dedicated worktree ${worktree}.`,
+    logs: workflow.logs,
+    worktree,
+    workflow: workflow.result,
+    status: await featureDevelopmentStatus(),
+  };
+}
+
+async function openFeatureWorktree(record) {
+  const source = await sourceInfoForFeature(record, new Map());
+  const worktree = path.resolve(source.worktree || record.rootPath);
+  if (!isPathInside(worktree, record.rootPath) || !statSafe(worktree)?.isDirectory()) {
+    throw new HttpError(400, `Feature worktree is not an approved directory for ${record.id}.`);
+  }
+  const command = process.platform === "win32" ? "explorer.exe" : process.platform === "darwin" ? "open" : "xdg-open";
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, [worktree], {
+      detached: true,
+      shell: false,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.once("error", (error) => {
+      reject(new HttpError(500, `Could not open ${worktree}: ${error.message}`, { logs: [error.message] }));
+    });
+    child.once("spawn", () => {
+      child.unref();
+      resolve({
+        message: `Opened the worktree for ${record.id}.`,
+        logs: [`Opened ${worktree} with the platform folder handler.`, `Process ID: ${child.pid || "unknown"}.`],
+        worktree,
+      });
+    });
+  });
+}
+
+function validatedFeatureBuildPayload(value) {
+  const payload = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const allowed = new Set(["limit", "sourceMode", "outputRoot", "shortcutName", "shortcutDir", "keepWork", "features"]);
+  for (const key of Object.keys(payload)) {
+    if (!allowed.has(key)) throw new HttpError(400, `Unsupported rebuild option: ${key}`);
+  }
+  if (payload.sourceMode && payload.sourceMode !== "current") {
+    throw new HttpError(400, "Feature Development rebuilds only accept the current installed Codex source.");
+  }
+  for (const key of ["outputRoot", "shortcutDir"]) {
+    const candidate = String(payload[key] || "").trim();
+    if (candidate && (!path.isAbsolute(candidate) || candidate.includes("\0"))) {
+      throw new HttpError(400, `${key} must be an absolute local path.`);
+    }
+  }
+  return payload;
+}
+
+function assertFeatureActionKeys(payload, allowedKeys) {
+  const allowed = new Set(["requestId", "action", ...allowedKeys]);
+  const unsupported = Object.keys(payload).filter((key) => !allowed.has(key));
+  if (unsupported.length) {
+    throw new HttpError(400, `Unsupported Feature Development field(s): ${unsupported.join(", ")}`);
+  }
+}
+
+async function executeFeatureDevelopmentAction(payload, requestId) {
+  if (activeFeatureActionId && activeFeatureActionId !== requestId) {
+    throw new HttpError(409, `Feature Development command ${activeFeatureActionId} is still running.`);
+  }
+  activeFeatureActionId = requestId;
+  try {
+    const action = String(payload.action || "").trim();
+    if (action === "set-enabled") {
+      assertFeatureActionKeys(payload, ["id", "enabled"]);
+      const id = validatedFeatureId(payload.id, "Feature ID");
+      const selection = saveFeatureModuleSelection({ id, enabled: payload.enabled === true });
+      if (!selection.ok) throw new HttpError(400, selection.error || "Feature catalog is invalid.");
+      return {
+        ok: true,
+        requestId,
+        action,
+        message: `${id} ${payload.enabled === true ? "enabled" : "disabled"}. Rebuild to apply the selection.`,
+        logs: [`Saved ${id}=${payload.enabled === true} in config/patcher.local.json.`],
+        status: await featureDevelopmentStatus(),
+      };
+    }
+    if (action === "create-local") {
+      assertFeatureActionKeys(payload, ["id"]);
+      const id = validatedFeatureId(payload.id, "Local feature ID", "local");
+      return { ok: true, requestId, action, ...(await createLocalFeature(id)) };
+    }
+    if (action === "convert-contribution") {
+      assertFeatureActionKeys(payload, ["id", "targetId"]);
+      const id = validatedFeatureId(payload.id, "Local feature ID");
+      const targetId = validatedFeatureId(payload.targetId, "Contribution feature ID", "contribution");
+      return { ok: true, requestId, action, ...(await convertLocalFeature(id, targetId)) };
+    }
+    if (action === "open-worktree") {
+      assertFeatureActionKeys(payload, ["id"]);
+      const id = validatedFeatureId(payload.id, "Feature ID");
+      const { catalog } = featureCatalogForAction();
+      return { ok: true, requestId, action, ...(await openFeatureWorktree(featureRecordForAction(catalog, id))) };
+    }
+    if (action === "rebuild") {
+      assertFeatureActionKeys(payload, ["build"]);
+      const job = startPatchBuild(validatedFeatureBuildPayload(payload.build));
+      return {
+        ok: true,
+        requestId,
+        action,
+        message: `Started verified rebuild ${job.id}.`,
+        logs: [`Job: ${job.id}`, `Status: ${job.status}`, `Log: ${job.logPath}`],
+        job,
+      };
+    }
+    throw new HttpError(400, "Unknown Feature Development action.");
+  } finally {
+    if (activeFeatureActionId === requestId) activeFeatureActionId = null;
+  }
+}
+
+async function runFeatureDevelopmentAction(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new HttpError(400, "Feature Development command body must be an object.");
+  }
+  const requestId = validatedFeatureRequestId(payload.requestId);
+  const completed = featureActionResults.get(requestId);
+  if (completed) return { ...completed, replayed: true };
+  const pending = featureActionInFlight.get(requestId);
+  if (pending) return { ...(await pending), replayed: true };
+  const operation = executeFeatureDevelopmentAction(payload, requestId);
+  featureActionInFlight.set(requestId, operation);
+  try {
+    const result = await operation;
+    featureActionResults.set(requestId, result);
+    while (featureActionResults.size > 100) {
+      featureActionResults.delete(featureActionResults.keys().next().value);
+    }
+    return result;
+  } finally {
+    featureActionInFlight.delete(requestId);
+  }
+}
+
 function updatePolicyStatus() {
   const config = mergedPatcherConfig();
   return {
@@ -1489,12 +2332,14 @@ function powershellExecutable() {
   return exists(systemPowerShell) ? systemPowerShell : "powershell.exe";
 }
 
-function checkCurrentCodexUpdate() {
+function checkCurrentCodexUpdate(refreshRemote = false) {
   const scriptPath = path.join(rootDir, "scripts", "ensure-current-codex-patch.ps1");
+  const arguments_ = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-CheckOnly", "-Quiet"];
+  if (refreshRemote) arguments_.push("-RefreshRemote");
   return new Promise((resolve, reject) => {
     const child = spawn(
       powershellExecutable(),
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-CheckOnly", "-Quiet"],
+      arguments_,
       { cwd: rootDir, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
     );
     let stdout = "";
@@ -1530,6 +2375,7 @@ function checkCurrentCodexUpdate() {
           reject(new HttpError(500, "Codex update check did not return structured status."));
           return;
         }
+        currentCodexUpdateSnapshot = updateState;
         resolve({ ...updateState, updatePolicy: updatePolicyStatus() });
       });
     });
@@ -1639,7 +2485,13 @@ function startPatchJob(type, preview) {
 }
 
 function startPatchBuild(payload) {
-  return startPatchJob("patch", patchPreview(payload));
+  const preview = patchPreview(payload);
+  const local = readJsonSafe(localPatcherConfigPath) || {};
+  writeJsonFile(localPatcherConfigPath, {
+    ...local,
+    buildFeatures: { ...preview.options.features },
+  });
+  return startPatchJob("patch", preview);
 }
 
 function defaultBundleOptions() {
@@ -1756,6 +2608,21 @@ async function handleApi(request, requestUrl, response) {
     sendJson(response, { runs: listOrchestrationRuns() });
     return;
   }
+  if (request.method === "GET" && requestUrl.pathname === "/api/patch/feature-development") {
+    const allowedOrigin = assertFeatureDevelopmentRequest(request);
+    sendJson(response, await featureDevelopmentStatus(), 200, featureDevelopmentCorsHeaders(allowedOrigin));
+    return;
+  }
+  if (request.method === "POST" && requestUrl.pathname === "/api/patch/feature-development/action") {
+    const allowedOrigin = assertFeatureDevelopmentRequest(request);
+    sendJson(
+      response,
+      await runFeatureDevelopmentAction(await readRequestJson(request)),
+      201,
+      featureDevelopmentCorsHeaders(allowedOrigin)
+    );
+    return;
+  }
   if (request.method === "GET" && requestUrl.pathname === "/api/patch/status") {
     sendJson(response, patchStatus());
     return;
@@ -1769,8 +2636,8 @@ async function handleApi(request, requestUrl, response) {
     return;
   }
   if (request.method === "POST" && requestUrl.pathname === "/api/patch/update/check") {
-    await readRequestJson(request);
-    sendJson(response, await checkCurrentCodexUpdate());
+    const payload = await readRequestJson(request);
+    sendJson(response, await checkCurrentCodexUpdate(payload?.refreshRemote === true));
     return;
   }
   if (request.method === "POST" && requestUrl.pathname === "/api/patch/update/apply") {
@@ -1847,21 +2714,34 @@ async function handleApi(request, requestUrl, response) {
 }
 
 const server = http.createServer((request, response) => {
-  if (request.method === "OPTIONS") {
-    response.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Cache-Control": "no-store",
-    });
-    response.end();
-    return;
-  }
   let requestUrl = null;
   try {
     requestUrl = new url.URL(request.url || "/", "http://localhost");
   } catch {
     sendError(response, 400, "Malformed request URL.");
+    return;
+  }
+  if (request.method === "OPTIONS") {
+    if (requestUrl.pathname.startsWith("/api/patch/feature-development")) {
+      try {
+        const allowedOrigin = assertFeatureDevelopmentRequest(request);
+        response.writeHead(204, {
+          ...featureDevelopmentCorsHeaders(allowedOrigin),
+          "Cache-Control": "no-store",
+        });
+      } catch (error) {
+        sendCaughtError(response, error);
+        return;
+      }
+    } else {
+      response.writeHead(204, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Cache-Control": "no-store",
+      });
+    }
+    response.end();
     return;
   }
   if (requestUrl.pathname.startsWith("/api/")) {

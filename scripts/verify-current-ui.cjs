@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 const fs = require("node:fs");
+const crypto = require("node:crypto");
 const path = require("node:path");
 const WebSocket = require("ws");
+const { resolveListeningProcess } = require("./resolve-listening-process.cjs");
 
 const port = Number(process.argv[2] || process.env.CODEX_PATCHED_REMOTE_DEBUGGING_PORT || 9229);
 const root = path.resolve(__dirname, "..");
@@ -13,27 +15,86 @@ const launcher = JSON.parse(fs.readFileSync(launcherPath, "utf8").replace(/^\uFE
 const outputDir = path.join(root, ".tmp", "ui-smoke");
 fs.mkdirSync(outputDir, { recursive: true });
 
+function sha256(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function sameHash(left, right) {
+  return Boolean(left && right) && String(left).toLowerCase() === String(right).toLowerCase();
+}
+
+function samePath(left, right) {
+  if (!left || !right) return false;
+  const normalizedLeft = path.resolve(String(left));
+  const normalizedRight = path.resolve(String(right));
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
 async function delay(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function pageTarget() {
+async function pageTarget(desktopProcess) {
   let targets = null;
   let lastError = null;
-  for (const host of ["127.0.0.1", "localhost"]) {
+  let connectedHost = null;
+  for (const host of desktopProcess.hosts) {
     try {
       const response = await fetch(`http://${host}:${port}/json/list`);
       if (!response.ok) throw new Error(`CDP endpoint returned ${response.status}.`);
       targets = await response.json();
+      connectedHost = host;
       break;
     } catch (error) {
       lastError = error;
     }
   }
-  if (!targets) throw lastError || new Error("CDP endpoint is unavailable.");
+  if (!targets) {
+    const detail = lastError?.message ? ` Last error: ${lastError.message}` : "";
+    throw new Error(
+      `Codex CDP is unavailable on port ${port}. Set CODEX_PATCHED_REMOTE_DEBUGGING_PORT=${port} and relaunch the patched app before running test:ui.${detail}`,
+    );
+  }
   const target = targets.find((entry) => entry.type === "page" && entry.url === "app://-/index.html") || targets[0];
-  if (!target?.webSocketDebuggerUrl) throw new Error("No Codex page target exposed by CDP.");
-  return target;
+  if (!target?.webSocketDebuggerUrl) {
+    throw new Error(`No Codex page target is exposed by CDP on port ${port}. Relaunch the patched app and retry.`);
+  }
+  return { connectedHost, target };
+}
+
+async function waitForCatalogShim(timeoutMs = 60_000) {
+  const basePort = Number(launcher.catalogShim?.basePort || 47851);
+  const expectedSourceSha256 = sha256(path.join(root, "scripts", "codex-all-chats-shim.cjs"));
+  const expectedUpstreamCli = launcher.catalogShim?.upstreamCli;
+  const expectedCliSha256 = launcher.sourceAppServerCliSha256;
+  const expectedMaxThreads = Number(launcher.catalogShim?.maxThreads || 10000);
+  const deadline = Date.now() + timeoutMs;
+  let health = null;
+  while (Date.now() < deadline) {
+    for (let shimPort = basePort; shimPort < basePort + 50; shimPort += 1) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${shimPort}/health`, {
+          signal: AbortSignal.timeout(1_000),
+        });
+        if (!response.ok) continue;
+        const candidate = await response.json();
+        const matches =
+          candidate.ok === true &&
+          candidate.service === "codex-all-chats-shim" &&
+          sameHash(candidate.runtimeSourceSha256, expectedSourceSha256) &&
+          sameHash(candidate.upstreamCliSha256, expectedCliSha256) &&
+          samePath(candidate.upstreamCli, expectedUpstreamCli) &&
+          Number(candidate.maxThreads) === expectedMaxThreads;
+        if (!matches) continue;
+        health = candidate;
+        if (candidate.expansions >= 1 && candidate.lastCatalogCount >= 1) return candidate;
+      } catch {}
+    }
+    await delay(1_000);
+  }
+  return health;
 }
 
 class CdpClient {
@@ -204,6 +265,7 @@ async function snapshot(client, name) {
       orchestrator: Boolean(window.__codexNativeOrchestrator),
       imports: Boolean(window.__codexNativeImportSettings),
       patcher: Boolean(window.__codexNativePatcherSettings),
+      featureDevelopment: typeof window.__codexNativePatcherSettings?.openSettingsRoute === 'function',
       preloadInterceptor: typeof window.electronBridge?.registerSendMessageInterceptor === 'function',
       historyHydration: window.__codexPatchStudioHistoryHydration || null
     },
@@ -231,7 +293,11 @@ async function snapshot(client, name) {
 }
 
 async function main() {
-  const target = await pageTarget();
+  const desktopProcess = resolveListeningProcess(port, {
+    expectedExecutablePath: launcher.codexExe,
+    expectedUserDataPath: launcher.electronUserDataPath,
+  });
+  const { connectedHost, target } = await pageTarget(desktopProcess);
   const client = new CdpClient(target.webSocketDebuggerUrl);
   await client.open();
   await client.send("Runtime.enable");
@@ -247,19 +313,30 @@ async function main() {
     if (hydration && hydration.requestedThreadLimit === 1000 && hydration.loadedThreadCount >= 1) break;
     await delay(1_000);
   }
-  while (catalogShimEnabled && Date.now() < hydrationDeadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${Number(launcher.catalogShim?.basePort || 47851)}/health`);
-      if (response.ok) {
-        catalogShim = await response.json();
-        if (catalogShim.ok === true && catalogShim.expansions >= 1 && catalogShim.lastCatalogCount >= 1) break;
-      }
-    } catch {}
-    await delay(1_000);
-  }
+  if (catalogShimEnabled) catalogShim = await waitForCatalogShim();
 
-  const results = { target: { title: target.title, url: target.url }, catalogShim, views: {} };
+  const results = {
+    desktopProcess: {
+      port,
+      pid: desktopProcess.pid,
+      executablePath: desktopProcess.executablePath,
+      userDataPath: desktopProcess.userDataPath,
+      localAddress: desktopProcess.localAddress,
+      host: connectedHost,
+    },
+    target: { title: target.title, url: target.url },
+    catalogShim,
+    views: {},
+  };
+  const navigationBridgeReady = await client.evaluate(`typeof globalThis.__codexNativeNavigate === 'function'`);
+  if (!navigationBridgeReady) throw new Error("Current Codex navigation bridge did not initialize.");
+  await client.evaluate(`globalThis.__codexNativeNavigate('/')`);
+  await delay(1800);
   results.views.main = await snapshot(client, "01-main");
+  const visibleSettingsRoutes = results.views.main.customHosts.filter((id) => /settings-route$/.test(id));
+  if (visibleSettingsRoutes.length > 0) {
+    throw new Error(`Main view remained on a settings route: ${visibleSettingsRoutes.join(", ")}`);
+  }
   for (const enabled of Object.entries(results.views.main.globals)) {
     if (enabled[0] !== "historyHydration" && !enabled[1]) throw new Error(`Native payload did not initialize: ${enabled[0]}`);
   }
@@ -271,8 +348,6 @@ async function main() {
     throw new Error(`Native 1,000-chat hydration did not report a valid runtime result: ${JSON.stringify(hydration)}`);
   }
 
-  const navigationBridgeReady = await client.evaluate(`typeof globalThis.__codexNativeNavigate === 'function'`);
-  if (!navigationBridgeReady) throw new Error("Current Codex navigation bridge did not initialize.");
   await client.evaluate(`globalThis.__codexNativeNavigate('/settings/providers')`);
   await delay(1800);
   results.views.settings = await snapshot(client, "02-settings");
@@ -282,13 +357,20 @@ async function main() {
   }
 
   let click;
-  for (const section of ["Providers", "Orchestrations", "Imports", "Patcher"]) {
-    click = await clickByText(client, section);
+  const settingsSections = [
+    { label: "Providers", key: "providers" },
+    { label: "Orchestrations", key: "orchestrations" },
+    { label: "Imports", key: "imports" },
+    { label: "Patcher", key: "patcher" },
+    { label: "Feature Development", key: "feature-development" },
+  ];
+  for (const section of settingsSections) {
+    click = await clickByText(client, section.label);
     if (!click.clicked) {
-      throw new Error(`Could not find native settings navigation item: ${section}. Candidates: ${JSON.stringify(click.candidates || [])}`);
+      throw new Error(`Could not find native settings navigation item: ${section.label}. Candidates: ${JSON.stringify(click.candidates || [])}`);
     }
     await delay(1200);
-    if (section === "Imports") {
+    if (section.key === "imports") {
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
         const bodyText = await client.evaluate("document.body?.innerText || ''");
@@ -296,20 +378,20 @@ async function main() {
         await delay(500);
       }
     }
-    const key = section.toLowerCase();
+    const key = section.key;
     results.views[key] = await snapshot(client, `03-${key}`);
     if (/403 Forbidden|Cross-site POST requests are not allowed|RangeError:|Import manager is not reachable/i.test(results.views[key].text)) {
-      throw new Error(`${section} route rendered a fatal bridge error: ${results.views[key].text.slice(0, 1200)}`);
+      throw new Error(`${section.label} route rendered a fatal bridge error: ${results.views[key].text.slice(0, 1200)}`);
     }
-    if (!results.views[key].text.toLowerCase().includes(key.slice(0, -1))) {
-      throw new Error(`${section} route rendered without recognizable content.`);
+    if (!results.views[key].text.toLowerCase().includes(section.label.toLowerCase())) {
+      throw new Error(`${section.label} route rendered without recognizable content.`);
     }
   }
 
   client.close();
   const summaryPath = path.join(outputDir, "summary.json");
   fs.writeFileSync(summaryPath, `${JSON.stringify(results, null, 2)}\n`, "utf8");
-  process.stdout.write(`${JSON.stringify({ ok: true, summaryPath, views: Object.fromEntries(Object.entries(results.views).map(([key, value]) => [key, { href: value.href, imagePath: value.imagePath, customHosts: value.customHosts }])) }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ ok: true, desktopProcess: results.desktopProcess, summaryPath, views: Object.fromEntries(Object.entries(results.views).map(([key, value]) => [key, { href: value.href, imagePath: value.imagePath, customHosts: value.customHosts }])) }, null, 2)}\n`);
 }
 
 main().catch((error) => {

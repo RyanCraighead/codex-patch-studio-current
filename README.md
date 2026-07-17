@@ -25,7 +25,7 @@ The stock Codex installation is never edited in place.
 ## Features
 
 - Loads the complete lightweight native chat catalog through a tokenized loopback app-server shim while leaving full conversation bodies lazy until opened. The default ceiling is 10,000 chats.
-- Adds native settings routes for Providers, Auto Router, Prompt Tools, Personas, Orchestrations, Swarm, Imports, and Patcher.
+- Adds native settings routes for Providers, Auto Router, Prompt Tools, Personas, Orchestrations, Swarm, Imports, Patcher, and Feature Development.
 - Adds OpenAI, DeepSeek, Z.ai GLM, Alibaba Qwen/DashScope, Cerebras, Ollama, LM Studio, and custom-provider model controls to the chat model picker.
 - Supports provider model discovery, visible-model filtering, reasoning controls, API-key setup, and local Responses API compatibility proxies.
 - Adds model routing, editable review/default prompts, prompt test panels, reusable personas, and subagent model templates.
@@ -69,7 +69,9 @@ To build a local self-extracting EXE after setup:
 npm run bundle:codex
 ```
 
-The bundle contains a clone of the Codex app installed on that machine. It is a local interoperability artifact and must not be committed, released, or uploaded.
+The bundle is a local-only artifact containing the user's installed Codex copy. It must not be published, shared, committed, released, or uploaded.
+
+By default, bundle launches reuse the stable non-portable Electron profile at `%LOCALAPPDATA%\CodexPatchStudioCurrent\electron-user-data`. Pass `-PortableElectronProfile` (for example, `npm run bundle:codex -- -PortableElectronProfile`) to use an isolated per-bundle profile under `bundled-profiles\<bundle-id>\electron-user-data` instead.
 
 To put builds on another drive, create the ignored file `config/patcher.local.json` before setup:
 
@@ -81,22 +83,26 @@ To put builds on another drive, create the ignored file `config/patcher.local.js
 
 ## Update Behavior
 
-The launcher compares four things before every launch:
+The launcher compares four local things before every launch:
 
 1. Installed Codex version.
 2. Installed package identity, location, and `app.asar` fingerprint.
 3. Generated clone, launcher metadata, and executable presence.
 4. Patcher source fingerprint.
 
+It can also consult the cached repository stable-channel manifest when that optional channel is enabled. The committed channel is disabled by default because this repository is private; manual **Check updates** remains available, and `manifestUrl` can be overridden with a reachable HTTPS endpoint.
+
 If nothing changed, launch is immediate. When Codex or patcher source changes, behavior follows the selected policy:
 
-- `Off`: launch the last verified clone without checking.
-- `Notify`: check once and ask before rebuilding. This is the recommended default.
-- `Auto rebuild`: check once and start a verified rebuild without prompting.
+- `Off`: launch the last verified clone without checking Codex or GitHub.
+- `Notify`: check once and ask before rebuilding. If the optional repository channel is enabled and reachable, it also reports a newer source release. This is the recommended default.
+- `Auto rebuild`: check once and start a locally verified Codex rebuild without prompting. Remote source is still never installed silently.
 
 Each candidate is built in a new directory while the known-good clone remains intact. The launcher config switches only after JavaScript, structural, and packed verification passes. If a running patched app needs to move to the new clone, only that old clone is stopped and relaunched; stock Codex remains open. Failed candidates never replace the last verified clone.
 
-Compatibility records in `config/compatibility.json` describe builds already validated by this repository; they do not pin the source build. See [Update Lifecycle](docs/UPDATE-LIFECYCLE.md).
+Core modules currently use a tested `26.707.x` adapter family. Later numeric `26.707.*` Store revisions can rebuild automatically only if every structural and packed check still passes. A new Store family, an ambiguous anchor, or an overlapping adapter fails closed and leaves the last verified clone selected until a compatible adapter is added.
+
+Compatibility records in `config/compatibility.json` describe builds already validated by this repository; they do not pin the source build. `update-channel/stable.json` is a source-only projection of those records that can be published at a reachable endpoint. When enabled, it is cached atomically, tolerates offline launches, and reports exact Codex and patcher-source fingerprint matches rather than trusting a numeric "supports up to" version. See [Update Lifecycle](docs/UPDATE-LIFECYCLE.md).
 
 ## Data Model
 
@@ -118,23 +124,29 @@ npm run features:validate
 npm run check:source-only
 npm test
 npm run test:live
+$env:CODEX_PATCHED_REMOTE_DEBUGGING_PORT = "9229"
+npm run launch:codex
 npm run test:runtime
 npm run test:ui
+Remove-Item Env:CODEX_PATCHED_REMOTE_DEBUGGING_PORT
 ```
 
 The current validated run against Codex `26.707.9981.0` proved:
 
 - Packed ASAR structural verification for every enabled patch module.
-- The complete 1,234-thread lightweight catalog fetched across 13 app-server pages in 377 ms, with full bodies left lazy.
+- The complete 1,200-plus-thread lightweight catalog fetched across paginated app-server results in under one second, with full bodies left lazy.
 - Separate stock and patched `config.toml` files.
 - Shared sessions and chat database.
 - Healthy import, patch-manager, and all-chats catalog-shim bridges.
-- 374 Codex projects indexed in the native Imports page without loading oversized rollout files into one JavaScript string.
+- Hundreds of Codex projects indexed in the native Imports page without loading oversized rollout files into one JavaScript string.
 - Healthy DeepSeek, Z.ai, DashScope, and Cerebras proxies.
 - Rendered native settings pages with screenshot checks.
 - Stock and patched Codex running at the same time.
 
-Runtime UI tests use a temporary local Chrome DevTools Protocol port. Normal shortcut launches do not expose that port.
+Runtime UI tests use a temporary local Chrome DevTools Protocol port. Set
+`CODEX_PATCHED_REMOTE_DEBUGGING_PORT` before launching the patched app so the
+launcher exposes that port to the two verifiers. Normal shortcut launches do
+not expose it.
 
 ## Distribution Boundary
 
@@ -152,11 +164,14 @@ Installed feature types:
 
 ```powershell
 npm run features:list
-node scripts\feature-registry.cjs scaffold --kind local --id local.my-feature
-node scripts\feature-registry.cjs scaffold --kind contribution --id example.my-feature
+$launcher = Get-Content .\codex-launcher.local.json -Raw | ConvertFrom-Json
+npm run feature:start -- --mode local --feature local.my-feature --slug my-feature --codex-version $launcher.sourceVersion --source-asar-sha256 $launcher.sourceAsarSha256 --source-cli-sha256 $launcher.sourceAppServerCliSha256
+npm run feature:status
+npm run feature:checkpoint -- --milestone first-successful-patch
+npm run feature:convert -- --feature example.my-feature
 ```
 
-The Patcher settings page lists optional modules and records selections. Modules receive a restricted synchronous patch context, cannot access Node or the filesystem directly, and must pass unpacked and packed verification. See [Feature Development](docs/FEATURE-DEVELOPMENT.md).
+The native Feature Development settings page lists core, community, and local modules with compatibility, source commit, and build/test status. It can create a local feature worktree, convert local work into a contribution, open its worktree, toggle modules, and start an immutable verified rebuild through guarded one-shot bridge commands. Local and contribution modules run in an isolated data-only VM with a restricted synchronous patch context; trusted built-in modules can invoke only the builder operations owned by their feature ID. Every module must pass unpacked and packed verification. See [Feature Development](docs/FEATURE-DEVELOPMENT.md) and [Feature Git Workflows](docs/FEATURE-WORKFLOWS.md).
 
 ## Local Services
 
@@ -177,14 +192,20 @@ All bridges bind to loopback. API keys remain Windows user environment variables
 | --- | --- |
 | `scripts/build-patched-codex-app.cjs` | Structural patch engine and packed verification |
 | `scripts/feature-registry.cjs` | Source-only feature discovery, resolution, restricted execution, and verification |
+| `scripts/feature-development-workflow.cjs` | Local/contribution worktrees, metadata, milestone commits, push, and draft PR workflow |
+| `scripts/codex-update-policy.psm1` | Tested Off, Notify, Auto, prompt, and failure decisions |
+| `scripts/check-remote-update-channel.cjs` | Cached GitHub source-release and exact Codex compatibility status |
+| `scripts/generate-update-channel.cjs` | Deterministic stable-channel generation and CI drift check |
 | `scripts/check-source-only.cjs` | Distribution, credential, and copied-source guard |
 | `scripts/ensure-current-codex-patch.ps1` | Update detection, patched-only stop, rebuild, relaunch |
 | `scripts/launch-patched-codex.ps1` | Isolated runtime initialization and service startup |
-| `native-patches/` | Native settings, provider, orchestration, import, and patcher payloads |
+| `native-patches/` | Shared managed agent templates used by the patched profile |
 | `viewer/` | Multi-source import manager |
 | `codex-viewer/` | Codex project/chat and patch manager |
 | `config/compatibility.json` | Previously validated current-build fingerprints |
-| `features/core/` | Built-in feature manifests |
+| `config/update-channel.json` | Optional channel enablement, local revision, URL, timeout, and cache policy |
+| `update-channel/stable.json` | Publishable source-only compatibility and patcher release manifest |
+| `features/core/` | Independent built-in modules with manifests, tested version-family adapters, payloads, tests, and docs |
 | `features/community/` | Reviewable source-only contribution modules |
 | `.agents/skills/` | Local-feature and contribution authoring workflows |
 | `tests/` | Source contracts and patch payload checks |

@@ -2,9 +2,11 @@
 
 "use strict";
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { requiredPackedVerification } = require("./packed-verification-contract.cjs");
 
 const arguments_ = process.argv.slice(2);
 const runtimeMode = arguments_.includes("--runtime");
@@ -22,6 +24,22 @@ function required(relativePath) {
   return filePath;
 }
 
+function sha256(filePath) {
+  const hash = crypto.createHash("sha256");
+  const handle = fs.openSync(filePath, "r");
+  const buffer = Buffer.allocUnsafe(4 * 1024 * 1024);
+  try {
+    while (true) {
+      const count = fs.readSync(handle, buffer, 0, buffer.length, null);
+      if (!count) break;
+      hash.update(buffer.subarray(0, count));
+    }
+  } finally {
+    fs.closeSync(handle);
+  }
+  return hash.digest("hex");
+}
+
 function filesUnder(root) {
   const files = [];
   const pending = [root];
@@ -34,6 +52,56 @@ function filesUnder(root) {
     }
   }
   return files;
+}
+
+function assertSourceProvenance(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Portable source manifest is missing sourceProvenance");
+  }
+  const repository = String(value.repository || "").trim();
+  let safeRepository = false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(repository)) {
+    const parsed = new URL(repository);
+    safeRepository =
+      ["https:", "http:", "ssh:", "git:"].includes(parsed.protocol) &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.search &&
+      !parsed.hash;
+  } else {
+    safeRepository = /^[^@\s/:]+@[^\s/:]+:[^\s]+$/.test(repository);
+  }
+  if (!safeRepository || path.isAbsolute(repository) || /^file:/i.test(repository)) {
+    throw new Error("Portable source provenance repository is not a sanitized remote URL");
+  }
+  if (!/^[a-f0-9]{40,64}$/i.test(String(value.commit || ""))) {
+    throw new Error("Portable source provenance commit is invalid");
+  }
+  if (value.branch != null && (typeof value.branch !== "string" || value.branch.length > 256 || /[\u0000-\u001f]/.test(value.branch))) {
+    throw new Error("Portable source provenance branch is invalid");
+  }
+  if (typeof value.dirty !== "boolean") {
+    throw new Error("Portable source provenance dirty flag must be true or false");
+  }
+}
+
+function assertFeatureEvidence(manifest) {
+  if (!Array.isArray(manifest.featureModules) || !Array.isArray(manifest.featureModuleApplication)) {
+    throw new Error("Portable source manifest is missing feature module build evidence");
+  }
+  const appliedIds = new Set();
+  for (const evidence of manifest.featureModuleApplication) {
+    const id = String(evidence?.id || "");
+    if (!/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(id) || appliedIds.has(id)) {
+      throw new Error(`Portable source manifest has invalid or duplicate feature evidence: ${id || "<missing>"}`);
+    }
+    appliedIds.add(id);
+  }
+  for (const feature of manifest.featureModules.filter((item) => item?.enabled === true)) {
+    if (!appliedIds.has(String(feature.id || ""))) {
+      throw new Error(`Portable source manifest is missing application evidence for enabled feature: ${feature.id}`);
+    }
+  }
 }
 
 function scanFileForSecrets(filePath, secrets) {
@@ -57,18 +125,60 @@ function scanFileForSecrets(filePath, secrets) {
 }
 
 const desktopExecutable = required(path.join("app", "ChatGPT.exe"));
-required(path.join("app", "resources", "app.asar"));
+const appAsar = required(path.join("app", "resources", "app.asar"));
 const nodeExecutable = required(path.join("app", "resources", "cua_node", "bin", "node.exe"));
 const sqliteExecutable = required(path.join("tools", "sqlite3.exe"));
+const installerSfx = required(path.join("tools", "7z-sfx-as-invoker.sfx"));
+required(path.join("assets", "portable", "bootstrap-launcher.cs"));
 required(path.join("node_modules", "classic-level", "package.json"));
 required(path.join("node_modules", "ws", "package.json"));
 required(path.join("scripts", "launch-patched-codex.ps1"));
+required(path.join("scripts", "codex-update-policy.psm1"));
+required(path.join("scripts", "check-remote-update-channel.cjs"));
+required(path.join("scripts", "generate-update-channel.cjs"));
+required(path.join("scripts", "atomic-json.cjs"));
+required(path.join("scripts", "build-lock.cjs"));
+required(path.join("scripts", "feature-development-workflow.cjs"));
+required(path.join("scripts", "run-tests.cjs"));
+required(path.join("scripts", "check-source-only.cjs"));
+required(path.join("scripts", "verify-portable-payload.cjs"));
+required(path.join("scripts", "verify-current-patched-build.cjs"));
+required(path.join("scripts", "verify-runtime-services.cjs"));
+required(path.join("scripts", "verify-current-ui.cjs"));
+required(path.join("scripts", "resolve-listening-process.cjs"));
 required(path.join("scripts", "export-augment-webview-state.cjs"));
-required(path.join("native-patches", "codex-native-provider-settings.js"));
+required(path.join("features", "core", "provider-suite", "payload", "codex-native-provider-settings.js"));
+required(path.join("config", "update-channel.json"));
+required(path.join("update-channel", "stable.json"));
+
+const expectedInstallerSfxSha256 =
+  "e1e9aa1eb9fe7f331de76479154ac4bb9998c8919dbc79bebe4f6eaa795ce312";
+const installerSfxSha256 = sha256(installerSfx);
+if (fs.statSync(installerSfx).size !== 141824 || installerSfxSha256 !== expectedInstallerSfxSha256) {
+  throw new Error("Portable installer SFX module does not match the pinned verified build");
+}
 
 const sourceManifestPath = required("bundle-source.json");
 const sourceManifestText = fs.readFileSync(sourceManifestPath, "utf8").replace(/^\uFEFF/, "");
 const sourceManifest = JSON.parse(sourceManifestText);
+if (typeof sourceManifest.portableElectronProfile !== "boolean") {
+  throw new Error("Portable source manifest portableElectronProfile must be true or false");
+}
+assertSourceProvenance(sourceManifest.sourceProvenance);
+assertFeatureEvidence(sourceManifest);
+if (!/^[a-f0-9]{64}$/i.test(String(sourceManifest.patchedAppAsarSha256 || ""))) {
+  throw new Error("Portable source manifest is missing patchedAppAsarSha256");
+}
+const patchedAppAsarSha256 = sha256(appAsar);
+if (patchedAppAsarSha256.toLowerCase() !== sourceManifest.patchedAppAsarSha256.toLowerCase()) {
+  throw new Error("Portable patched app.asar hash does not match the source manifest");
+}
+const requiredVerification = requiredPackedVerification(sourceManifest.features);
+for (const key of requiredVerification) {
+  if (sourceManifest.packedVerification?.[key] !== true) {
+    throw new Error(`Portable source manifest is missing packed verification: ${key}`);
+  }
+}
 for (const forbiddenField of ["sourceAppDir", "sourceConfigPath"]) {
   if (Object.hasOwn(sourceManifest, forbiddenField)) {
     throw new Error(`Portable source manifest leaks ${forbiddenField}`);
@@ -106,6 +216,37 @@ if (runtimeMode) {
   }
   if (!path.resolve(String(runtimeLauncher.codexExe || "")).startsWith(`${normalizedRoot}${path.sep}`)) {
     throw new Error("Initialized portable runtime launcher points outside its extracted root.");
+  }
+  if (typeof runtimeLauncher.portableElectronProfile !== "boolean") {
+    throw new Error("Initialized portable runtime launcher has no explicit Electron profile mode.");
+  }
+  if (runtimeLauncher.portableElectronProfile !== sourceManifest.portableElectronProfile) {
+    throw new Error("Initialized portable runtime launcher changed the packaged Electron profile mode.");
+  }
+  if (runtimeLauncher.patchedAppAsarSha256 !== sourceManifest.patchedAppAsarSha256) {
+    throw new Error("Initialized portable runtime launcher changed the patched app.asar hash.");
+  }
+  if (JSON.stringify(runtimeLauncher.sourceProvenance) !== JSON.stringify(sourceManifest.sourceProvenance)) {
+    throw new Error("Initialized portable runtime launcher changed the source provenance.");
+  }
+  if (JSON.stringify(runtimeLauncher.featureModuleApplication) !== JSON.stringify(sourceManifest.featureModuleApplication)) {
+    throw new Error("Initialized portable runtime lost per-feature application evidence.");
+  }
+  for (const key of requiredVerification) {
+    if (runtimeLauncher.packedVerification?.[key] !== true) {
+      throw new Error(`Initialized portable runtime lost packed verification: ${key}`);
+    }
+  }
+  const electronUserDataPath = path.resolve(String(runtimeLauncher.electronUserDataPath || ""));
+  const expectedElectronUserDataPath = sourceManifest.portableElectronProfile
+    ? path.resolve(String(runtimeLauncher.profileRoot || ""), "electron-user-data")
+    : path.resolve(
+      String(process.env.LOCALAPPDATA || ""),
+      "CodexPatchStudioCurrent",
+      "electron-user-data",
+    );
+  if (electronUserDataPath.toLowerCase() !== expectedElectronUserDataPath.toLowerCase()) {
+    throw new Error("Initialized portable runtime launcher selected the wrong Electron profile path.");
   }
 }
 
@@ -155,9 +296,15 @@ process.stdout.write(`${JSON.stringify({
   payloadFileCount: payloadFiles.length,
   bundledNodeVersion: nodeCheck.stdout.trim(),
   bundledSqliteVersion: sqliteCheck.stdout.trim().split(/\s+/)[0],
+  installerSfxSha256,
+  patchedAppAsarSha256,
+  sourceRepository: sourceManifest.sourceProvenance.repository,
+  sourceCommit: sourceManifest.sourceProvenance.commit,
   scannedProviderSecretCount: secrets.length,
   privateRuntimeFilesPresent: false,
   generatedLauncherConfigPresent: fs.existsSync(runtimeLauncherPath),
   verificationMode: runtimeMode ? "initialized-runtime" : "dormant-payload",
+  portableElectronProfile: sourceManifest.portableElectronProfile,
+  portableBuildAssetsPresent: true,
   localSourcePathsPresent: /sourceAppDir|sourceConfigPath/.test(sourceManifestText),
 }, null, 2)}\n`);

@@ -3,18 +3,23 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { catalogFingerprint, discoverFeatureModules } = require("./feature-registry.cjs");
+const { canonicalSourceBytes, catalogFingerprint, discoverFeatureModules } = require("./feature-registry.cjs");
 
 const SOURCE_PATHS = [
   "config/compatibility.json",
   "config/patcher.json",
-  "native-patches/codex-native-import-settings.js",
-  "native-patches/codex-native-orchestrator.js",
-  "native-patches/codex-native-patcher-settings.js",
-  "native-patches/codex-native-provider-settings.js",
+  "config/update-channel.json",
+  "features/core/imports/payload/codex-native-import-settings.js",
+  "features/core/orchestrations/payload/codex-native-orchestrator.js",
+  "features/core/patcher-ui/payload/codex-native-patcher-settings.js",
+  "features/core/provider-suite/payload/codex-native-provider-settings.js",
   "scripts/build-patched-codex-app.cjs",
   "scripts/feature-registry.cjs",
   "scripts/codex-launcher.ps1",
+  "scripts/codex-update-policy.psm1",
+  "scripts/check-remote-update-channel.cjs",
+  "scripts/generate-update-channel.cjs",
+  "scripts/ensure-current-codex-patch.ps1",
   "scripts/codex-all-chats-shim.cjs",
   "scripts/codex-responses-chat-proxy.cjs",
   "scripts/initialize-patched-codex-home.ps1",
@@ -23,6 +28,15 @@ const SOURCE_PATHS = [
   "scripts/start-codex-import-manager.ps1",
   "scripts/start-codex-patch-manager.ps1",
   "scripts/start-codex-provider-proxies.ps1",
+  "scripts/package-patched-codex-single-exe.ps1",
+  "scripts/packed-verification-contract.cjs",
+  "scripts/verify-portable-payload.cjs",
+  "scripts/verify-current-patched-build.cjs",
+  "scripts/verify-runtime-services.cjs",
+  "scripts/verify-current-ui.cjs",
+  "scripts/resolve-listening-process.cjs",
+  "assets/portable/bootstrap-launcher.cs",
+  "tools/7z-sfx-as-invoker.sfx",
   "viewer/jsonl-reader.cjs",
   "viewer/server.cjs",
   "codex-viewer/server.cjs",
@@ -37,7 +51,7 @@ function patcherFingerprint(rootDir) {
     const content = fs.readFileSync(filePath);
     hash.update(relativePath.replace(/\\/g, "/"));
     hash.update("\0");
-    hash.update(content);
+    hash.update(canonicalSourceBytes(relativePath, content));
     hash.update("\0");
     files.push(relativePath);
   }

@@ -2,10 +2,14 @@
 "use strict";
 
 const http = require("node:http");
+const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+
+const proxySourceSha256 = crypto.createHash("sha256").update(fs.readFileSync(__filename)).digest("hex");
+const runtimeRoot = path.resolve(__dirname, "..");
 
 const PROXY_FEATURES = {
   envAdmin: true,
@@ -189,6 +193,8 @@ function healthBody() {
     hasApiKey: hasProviderApiKey(),
     modelCacheDir,
     pid: process.pid,
+    sourceSha256: proxySourceSha256,
+    runtimeRoot,
     features: PROXY_FEATURES,
   };
 }

@@ -1,6 +1,7 @@
 param(
   [switch]$Force,
   [switch]$CheckOnly,
+  [switch]$RefreshRemote,
   [switch]$Quiet
 )
 
@@ -10,6 +11,7 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $LauncherConfigPath = Join-Path $RepoRoot "codex-launcher.local.json"
 $BaseConfigPath = Join-Path $RepoRoot "config\patcher.json"
 $LocalConfigPath = Join-Path $RepoRoot "config\patcher.local.json"
+$UpdateChannelConfigPath = Join-Path $RepoRoot "config\update-channel.json"
 $LogDir = Join-Path $RepoRoot "codex-patch-jobs\current-build"
 $LogPath = Join-Path $LogDir "ensure-current.log"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -218,6 +220,74 @@ $currentPatcherFingerprint = (& $fingerprintNode $fingerprintScript | ConvertFro
 $configuredPatcherFingerprint = [string]$launcher.patcherSource.sha256
 $currentAsarSha256 = Get-Sha256Hex -Path $current.AsarPath
 $currentExeSha256 = Get-Sha256Hex -Path $current.ExePath
+$remoteUpdate = $null
+$configuredUpdatePolicy = ([string]$projectConfig.updatePolicy).Trim().ToLowerInvariant()
+$updateChannelConfig = Read-JsonObject -Path $UpdateChannelConfigPath
+$remoteChannelEnabled = $null -ne $updateChannelConfig -and $updateChannelConfig.enabled -eq $true
+if ($RefreshRemote -or ($remoteChannelEnabled -and $configuredUpdatePolicy -ne "off")) {
+  $remoteChecker = Join-Path $RepoRoot "scripts\check-remote-update-channel.cjs"
+  $remoteArguments = @(
+    $remoteChecker,
+    "--installed-version", [string]$current.Version,
+    "--installed-asar-sha256", $currentAsarSha256,
+    "--installed-exe-sha256", $currentExeSha256,
+    "--local-patcher-sha256", [string]$currentPatcherFingerprint
+  )
+  if ($RefreshRemote) {
+    $remoteArguments += "--force-refresh"
+  }
+  try {
+    $remoteText = (& $fingerprintNode @remoteArguments 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+      throw "Remote channel checker exited with code $LASTEXITCODE. $remoteText"
+    }
+    $remoteUpdate = $remoteText | ConvertFrom-Json
+    Write-EnsureLog "Repository channel status: source=$($remoteUpdate.network.source) reachable=$($remoteUpdate.network.reachable) update=$($remoteUpdate.repository.updateAvailable) codex=$($remoteUpdate.compatibility.status)."
+  } catch {
+    Write-EnsureLog "Repository channel check failed without blocking local validation: $($_.Exception.Message)"
+    $remoteUpdate = [pscustomobject]@{
+      ok = $false
+      network = [pscustomobject]@{
+        reachable = $false
+        source = "error"
+        warning = $_.Exception.Message
+      }
+      repository = [pscustomobject]@{
+        updateAvailable = $false
+        shouldNotify = $false
+      }
+      compatibility = [pscustomobject]@{
+        installedVersion = [string]$current.Version
+        status = "unknown"
+        exactFingerprint = $false
+      }
+    }
+  }
+} else {
+  $remoteChannelSource = if ($configuredUpdatePolicy -eq "off") { "policy-off" } else { "channel-disabled" }
+  $remoteChannelWarning = if ($configuredUpdatePolicy -eq "off") {
+    "Repository checks are disabled by the update policy."
+  } else {
+    "Automatic repository checks are disabled. Use Check updates to run one manually."
+  }
+  $remoteUpdate = [pscustomobject]@{
+    ok = $true
+    network = [pscustomobject]@{
+      reachable = $false
+      source = $remoteChannelSource
+      warning = $remoteChannelWarning
+    }
+    repository = [pscustomobject]@{
+      updateAvailable = $false
+      shouldNotify = $false
+    }
+    compatibility = [pscustomobject]@{
+      installedVersion = [string]$current.Version
+      status = "not-checked"
+      exactFingerprint = $false
+    }
+  }
+}
 $configuredAsarSha256 = if ($launcher.sourceAsarSha256) { [string]$launcher.sourceAsarSha256 } else { "" }
 $configuredExeSha256 = if ($launcher.sourceDesktopExeSha256) { [string]$launcher.sourceDesktopExeSha256 } else { "" }
 $reasons = @()
@@ -233,6 +303,7 @@ $reasons = @($reasons | Select-Object -Unique)
 $needsBuild = $reasons.Count -gt 0
 $codexUpdateAvailable = @($reasons | Where-Object { $_ -in @("codex-version-changed", "codex-package-changed", "installed-asar-changed", "installed-executable-changed") }).Count -gt 0
 $patcherUpdateAvailable = $reasons -contains "patcher-source-changed"
+$remotePatcherUpdateAvailable = $remoteUpdate.repository.updateAvailable -eq $true
 
 if ($CheckOnly) {
   [pscustomobject]@{
@@ -241,6 +312,8 @@ if ($CheckOnly) {
     needsBuild = $needsBuild
     codexUpdateAvailable = $codexUpdateAvailable
     patcherUpdateAvailable = $patcherUpdateAvailable
+    remotePatcherUpdateAvailable = $remotePatcherUpdateAvailable
+    remoteUpdate = $remoteUpdate
     reasons = $reasons
     installedVersion = $current.Version
     installedPackage = $current.PackageFullName
@@ -264,6 +337,8 @@ if (-not $needsBuild) {
     needsBuild = $false
     codexUpdateAvailable = $false
     patcherUpdateAvailable = $false
+    remotePatcherUpdateAvailable = $remotePatcherUpdateAvailable
+    remoteUpdate = $remoteUpdate
     reasons = @()
     installedVersion = $current.Version
     patchedVersion = $configuredVersion
@@ -320,6 +395,8 @@ if ($relaunchAfterBuild) {
   needsBuild = $false
   codexUpdateAvailable = $codexUpdateAvailable
   patcherUpdateAvailable = $patcherUpdateAvailable
+  remotePatcherUpdateAvailable = $remotePatcherUpdateAvailable
+  remoteUpdate = $remoteUpdate
   reasons = $reasons
   installedVersion = $current.Version
   patchedVersion = [string]$launcher.sourceVersion

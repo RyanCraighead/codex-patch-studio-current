@@ -5,12 +5,35 @@
   "description": "Optionally patches the renderer to eagerly hydrate a large recent-task window. Disabled by default because it can cause severe lag with large catalogs.",
   "version": "1.0.0",
   "kind": "core",
-  "implementation": "builtin",
+  "implementation": "module",
   "enabledByDefault": false,
   "legacyFeatureIds": ["chatLimit"],
   "dependencies": [],
   "conflicts": ["core.history"],
-  "permissions": ["patch:asar"],
-  "verification": [],
+  "supports": { "codexVersions": ["26.707.x"] },
+  "structuralAnchors": [
+    {
+      "id": "recent-history-loader",
+      "path": "webview/assets/app-server-manager-signals-*.js",
+      "includes": "let r=this.params.getHistoryLimit?.()??50,i=(t===`expanded`||n)&&r>50,a=i?r:50",
+      "cardinality": { "exact": 1 }
+    }
+  ],
+  "runtime": { "permissions": ["patch:asar"], "localPorts": [] },
+  "native": { "settings": [], "sidebar": [] },
+  "verification": [
+    {
+      "id": "module-receipt",
+      "path": "codex-patch-studio/features/core.eager-history.json",
+      "includes": "core.eager-history",
+      "cardinality": { "exact": 1 }
+    },
+    {
+      "id": "history-hydration-diagnostic",
+      "path": "webview/assets/app-server-manager-signals-*.js",
+      "includes": "__codexPatchStudioHistoryHydration",
+      "cardinality": { "exact": 1 }
+    }
+  ],
   "distribution": { "upstreamArtifacts": "forbidden" }
 }

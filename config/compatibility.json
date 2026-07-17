@@ -25,6 +25,7 @@
     "orchestrations",
     "chat-imports",
     "patch-manager",
+    "remote-update-channel",
     "reasoning-summary-conversion"
   ]
 }

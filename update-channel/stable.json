@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "channel": "stable",
+  "revision": 1,
+  "publishedAt": "2026-07-17T02:47:16.357Z",
+  "patcher": {
+    "version": "0.1.0",
+    "releaseUrl": "https://github.com/RyanCraighead/codex-patch-studio-current/releases",
+    "sourceSha256": "a90997b3129eab130c39e0ab4bb597a21fe05f268b537e755395db8da4c5dad8"
+  },
+  "codex": {
+    "packageName": "OpenAI.Codex",
+    "architecture": "x64",
+    "validatedBuilds": [
+      {
+        "version": "26.707.9981.0",
+        "appAsarSha256": "e286d538971d7b4648692b244d80b0b1e9d227d29564275ad46f6653280d4094",
+        "desktopExecutableName": "ChatGPT.exe",
+        "desktopExeSha256": "28c3e8b6c55fff39ecb12a5eb27f493abf997804247517aa7a46c277ca5d9e93",
+        "validatedAt": "2026-07-15T00:00:00.000Z"
+      }
+    ]
+  }
+}

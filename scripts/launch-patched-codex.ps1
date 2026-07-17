@@ -107,6 +107,7 @@ function Clear-SharedProcessManagerState {
 
 Write-Log "Starting patched Codex launcher."
 . (Join-Path $PSScriptRoot "codex-launcher.ps1")
+Import-Module (Join-Path $PSScriptRoot "codex-update-policy.psm1") -Force
 
 function Get-PatcherProjectConfig {
   $merged = [ordered]@{}
@@ -125,38 +126,11 @@ function Get-PatcherProjectConfig {
   return [pscustomobject]$merged
 }
 
-function Resolve-UpdatePolicy {
-  param([object]$Config)
-
-  $policy = ([string]$Config.updatePolicy).Trim().ToLowerInvariant()
-  if ($policy -in @("off", "notify", "auto")) {
-    return $policy
-  }
-  if ($Config.autoRebuildOnLaunch -eq $false) {
-    return "off"
-  }
-  return "notify"
-}
-
 function Show-CodexUpdatePrompt {
   param([object]$State)
 
   Add-Type -AssemblyName System.Windows.Forms
-  $reasonText = if ($State.codexUpdateAvailable) {
-    "A new or changed Codex installation was detected."
-  } elseif ($State.patcherUpdateAvailable) {
-    "The patch framework has changed since this clone was built."
-  } else {
-    "This patched clone needs to be rebuilt."
-  }
-  $detail = @(
-    $reasonText,
-    "",
-    "Installed Codex: $($State.installedVersion)",
-    "Patched Codex: $($State.patchedVersion)",
-    "",
-    "Rebuild now? The patcher will build a separate local clone, run structural and packed verification, and switch to it only if validation succeeds."
-  ) -join "`r`n"
+  $detail = Get-CodexUpdatePromptText -State $State
   $result = [System.Windows.Forms.MessageBox]::Show(
     $detail,
     "Codex Patch Studio update detected",
@@ -167,13 +141,56 @@ function Show-CodexUpdatePrompt {
   return $result -eq [System.Windows.Forms.DialogResult]::Yes
 }
 
+function Show-RepositoryUpdatePrompt {
+  param([object]$RemoteUpdate)
+
+  Add-Type -AssemblyName System.Windows.Forms
+  $repository = $RemoteUpdate.repository
+  $detail = @(
+    "A newer Codex Patch Studio source release is available.",
+    "",
+    "Installed patcher: $($repository.localVersion) (channel revision $($repository.localRevision))",
+    "GitHub patcher: $($repository.remoteVersion) (channel revision $($repository.remoteRevision))",
+    "Installed Codex compatibility: $($RemoteUpdate.compatibility.status)",
+    "",
+    "Open the verified source release page? The current patcher and last-known-good clone will remain unchanged."
+  ) -join "`r`n"
+  $result = [System.Windows.Forms.MessageBox]::Show(
+    $detail,
+    "Codex Patch Studio source update",
+    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+    [System.Windows.Forms.MessageBoxIcon]::Information,
+    [System.Windows.Forms.MessageBoxDefaultButton]::Button1
+  )
+  return $result -eq [System.Windows.Forms.DialogResult]::Yes
+}
+
+function Mark-RepositoryUpdateNotified {
+  param([string]$NotificationKey)
+
+  if (-not $NotificationKey) {
+    return
+  }
+  $node = if ($env:CODEX_PATCHED_NODE -and (Test-Path -LiteralPath $env:CODEX_PATCHED_NODE)) {
+    $env:CODEX_PATCHED_NODE
+  } else {
+    "node"
+  }
+  $checker = Join-Path $RepoRoot "scripts\check-remote-update-channel.cjs"
+  try {
+    & $node $checker --mark-notified $NotificationKey | Out-Null
+  } catch {
+    Write-Log "Could not record the repository update notification: $($_.Exception.Message)"
+  }
+}
+
 function Show-CodexUpdateFailure {
   param([string]$Message)
 
   try {
     Add-Type -AssemblyName System.Windows.Forms
     [System.Windows.Forms.MessageBox]::Show(
-      "The updated Codex build could not be patched safely.`r`n`r`n$Message`r`n`r`nThe installed Codex app was not modified. Open the Patcher settings or logs for details.",
+      (Get-CodexUpdateFailureText -Message $Message),
       "Codex Patch Studio update failed",
       [System.Windows.Forms.MessageBoxButtons]::OK,
       [System.Windows.Forms.MessageBoxIcon]::Error
@@ -185,7 +202,7 @@ function Show-CodexUpdateFailure {
 
 $projectConfig = Get-PatcherProjectConfig
 $existingLauncherConfig = Get-CodexLauncherConfig
-$updatePolicy = Resolve-UpdatePolicy -Config $projectConfig
+$updatePolicy = Resolve-CodexUpdatePolicy -Config $projectConfig
 
 $sourceCodexHome = Join-Path $env:USERPROFILE ".codex"
 $patchedCodexHome = if ($env:CODEX_PATCHED_HOME) {
@@ -226,23 +243,37 @@ try {
         $checkSummary = $checkResult | ConvertFrom-Json
         Write-Log "Patch check complete. installed=$($checkSummary.installedVersion) patched=$($checkSummary.patchedVersion) needsBuild=$($checkSummary.needsBuild) reasons=$(@($checkSummary.reasons) -join ',')"
 
-        $shouldBuild = $updatePolicy -eq "auto"
-        if ($updatePolicy -eq "notify" -and $checkSummary.needsBuild) {
-          $shouldBuild = Show-CodexUpdatePrompt -State $checkSummary
+        $remoteUpdate = $checkSummary.remoteUpdate
+        if ($remoteUpdate.repository.updateAvailable -eq $true) {
+          Write-Log "A newer patcher source release is available: local=$($remoteUpdate.repository.localVersion)/$($remoteUpdate.repository.localRevision) remote=$($remoteUpdate.repository.remoteVersion)/$($remoteUpdate.repository.remoteRevision)."
+          if ($updatePolicy -eq "notify" -and $remoteUpdate.repository.shouldNotify -eq $true) {
+            $openRelease = Show-RepositoryUpdatePrompt -RemoteUpdate $remoteUpdate
+            Mark-RepositoryUpdateNotified -NotificationKey ([string]$remoteUpdate.repository.notificationKey)
+            if ($openRelease -and $remoteUpdate.repository.releaseUrl) {
+              Start-Process -FilePath ([string]$remoteUpdate.repository.releaseUrl) | Out-Null
+            }
+          }
         }
 
-        if ($checkSummary.needsBuild -and $shouldBuild) {
+        $promptAccepted = $null
+        if ($updatePolicy -eq "notify" -and $checkSummary.needsBuild) {
+          $promptAccepted = Show-CodexUpdatePrompt -State $checkSummary
+        }
+        $updatePlan = Get-CodexUpdatePlan -Policy $updatePolicy -NeedsBuild ([bool]$checkSummary.needsBuild) -PromptAccepted $promptAccepted
+
+        if ($updatePlan.rebuild) {
           $ensureResult = & (Join-Path $PSScriptRoot "ensure-current-codex-patch.ps1") -Quiet
           $ensureSummary = $ensureResult | ConvertFrom-Json
           Write-Log "Patch rebuild complete. installed=$($ensureSummary.installedVersion) rebuilt=$($ensureSummary.rebuilt)"
           $existingLauncherConfig = Get-CodexLauncherConfig
-        } elseif ($checkSummary.needsBuild) {
+        } elseif ($updatePlan.allowStale) {
           $env:CODEX_ALLOW_STALE_PATCHED_LAUNCH = "1"
           Write-Log "User deferred the rebuild; launching the existing immutable clone."
         }
       } catch {
         Show-CodexUpdateFailure -Message $_.Exception.Message
-        if ($updatePolicy -eq "notify") {
+        $failurePlan = Get-CodexUpdatePlan -Policy $updatePolicy -CheckFailed
+        if ($failurePlan.allowStale) {
           $env:CODEX_ALLOW_STALE_PATCHED_LAUNCH = "1"
           Write-Log "Update check failed in notify mode; launching the existing clone. Error: $($_.Exception.Message)"
         } else {

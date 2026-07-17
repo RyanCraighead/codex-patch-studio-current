@@ -20,5 +20,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run features:validate
+      - run: npm run channel:check
       - run: npm run check:source-only
       - run: npm test

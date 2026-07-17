@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $localConfigPath = Join-Path $RepoRoot "config\patcher.local.json"
+Import-Module (Join-Path $PSScriptRoot "codex-update-policy.psm1") -Force
 
 function Read-LocalConfig {
   if (-not (Test-Path -LiteralPath $localConfigPath)) {
@@ -20,36 +21,11 @@ function Read-LocalConfig {
   return $result
 }
 
-function Select-UpdatePolicy {
-  param([string]$RequestedPolicy, [System.Collections.IDictionary]$LocalConfig)
-
-  if ($RequestedPolicy) {
-    return $RequestedPolicy
-  }
-  $existing = ([string]$LocalConfig["updatePolicy"]).Trim().ToLowerInvariant()
-  if ($existing -in @("off", "notify", "auto") -and $LocalConfig["updatePolicyConfigured"] -eq $true) {
-    return $existing
-  }
-  if ($env:CI -or [Console]::IsInputRedirected) {
-    return "notify"
-  }
-
-  $choices = @(
-    [System.Management.Automation.Host.ChoiceDescription]::new("&Notify (recommended)", "Check on launch and ask before rebuilding."),
-    [System.Management.Automation.Host.ChoiceDescription]::new("&Auto rebuild", "Check, validate, and rebuild automatically."),
-    [System.Management.Automation.Host.ChoiceDescription]::new("&Off", "Do not check for installed Codex updates on launch.")
-  )
-  $selection = $Host.UI.PromptForChoice(
-    "Codex update policy",
-    "Codex updates can invalidate patch anchors. Choose how Codex Patch Studio should handle installed Codex updates.",
-    $choices,
-    0
-  )
-  return @("notify", "auto", "off")[$selection]
-}
-
 $localConfig = Read-LocalConfig
-$resolvedUpdatePolicy = Select-UpdatePolicy -RequestedPolicy $UpdatePolicy -LocalConfig $localConfig
+$resolvedUpdatePolicy = Select-CodexUpdatePolicy `
+  -RequestedPolicy $UpdatePolicy `
+  -LocalConfig $localConfig `
+  -NonInteractive:([bool]($env:CI -or [Console]::IsInputRedirected))
 $localConfig["updatePolicy"] = $resolvedUpdatePolicy
 $localConfig["updatePolicyConfigured"] = $true
 $localConfig["autoRebuildOnLaunch"] = $resolvedUpdatePolicy -eq "auto"

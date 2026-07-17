@@ -5,12 +5,35 @@
   "description": "Optionally forces a visible main window shortly after startup.",
   "version": "1.0.0",
   "kind": "core",
-  "implementation": "builtin",
+  "implementation": "module",
   "enabledByDefault": false,
   "legacyFeatureIds": ["forceMainWindowStartup"],
   "dependencies": [],
   "conflicts": [],
-  "permissions": ["patch:asar"],
-  "verification": [],
+  "supports": { "codexVersions": ["26.707.x"] },
+  "structuralAnchors": [
+    {
+      "id": "startup-window-ensure",
+      "path": ".vite/build/main-*.js",
+      "includes": "let Le=await R.ensureWindow();",
+      "cardinality": { "exact": 1 }
+    }
+  ],
+  "runtime": { "permissions": ["patch:asar"], "localPorts": [] },
+  "native": { "settings": [], "sidebar": [] },
+  "verification": [
+    {
+      "id": "module-receipt",
+      "path": "codex-patch-studio/features/core.force-main-window.json",
+      "includes": "core.force-main-window",
+      "cardinality": { "exact": 1 }
+    },
+    {
+      "id": "delayed-window-ensure",
+      "path": ".vite/build/main-*.js",
+      "includes": "codex-patch-studio:force-main-window",
+      "cardinality": { "exact": 1 }
+    }
+  ],
   "distribution": { "upstreamArtifacts": "forbidden" }
 }

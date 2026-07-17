@@ -5,12 +5,45 @@
   "description": "Adds native patch controls, update policy, module controls, and About Patcher.",
   "version": "1.0.0",
   "kind": "core",
-  "implementation": "builtin",
+  "implementation": "module",
   "enabledByDefault": true,
   "legacyFeatureIds": ["patcherSettings"],
   "dependencies": ["core.settings-shell"],
   "conflicts": [],
-  "permissions": ["patch:asar", "bridge:loopback"],
-  "verification": [],
+  "supports": { "codexVersions": ["26.707.x"] },
+  "structuralAnchors": [
+    {
+      "id": "webview-script-insertion-point",
+      "path": "webview/index.html",
+      "includes": "  <meta http-equiv=\"Content-Security-Policy\"",
+      "cardinality": { "exact": 1 }
+    }
+  ],
+  "runtime": {
+    "permissions": ["patch:asar", "bridge:loopback"],
+    "localPorts": [
+      { "name": "patch-manager", "port": 4590, "protocol": "tcp", "host": "127.0.0.1" }
+    ]
+  },
+  "native": {
+    "settings": [
+      { "id": "core.patcher-ui.settings", "label": "Patcher", "route": "/settings/patcher" }
+    ],
+    "sidebar": []
+  },
+  "verification": [
+    {
+      "id": "module-receipt",
+      "path": "codex-patch-studio/features/core.patcher-ui.json",
+      "includes": "core.patcher-ui",
+      "cardinality": { "exact": 1 }
+    },
+    {
+      "id": "patcher-settings-payload",
+      "path": "webview/assets/codex-native-patcher-settings.js",
+      "includes": "window.__codexNativePatcherSettings = {",
+      "cardinality": { "exact": 1 }
+    }
+  ],
   "distribution": { "upstreamArtifacts": "forbidden" }
 }

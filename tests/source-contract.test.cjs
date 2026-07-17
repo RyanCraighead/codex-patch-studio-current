@@ -1,10 +1,15 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const root = path.resolve(__dirname, "..");
+const { findEmbeddedUpstreamAnchors } = require("../scripts/check-source-only.cjs");
+const { canonicalSourceBytes, hashDirectory } = require("../scripts/feature-registry.cjs");
+const { normalizeManifestText } = require("../scripts/generate-update-channel.cjs");
+const { patcherFingerprint } = require("../scripts/patcher-fingerprint.cjs");
 
 function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -39,8 +44,33 @@ test("runtime verifiers support lazy all-chats mode", () => {
   const uiVerifier = read("scripts/verify-current-ui.cjs");
   assert.match(runtimeVerifier, /waitForCatalogShim/);
   assert.match(runtimeVerifier, /catalogShimEnabled/);
+  assert.match(uiVerifier, /waitForCatalogShim/);
   assert.match(uiVerifier, /codex-all-chats-shim/);
   assert.match(uiVerifier, /catalogShimEnabled/);
+  assert.match(uiVerifier, /runtimeSourceSha256/);
+  assert.match(uiVerifier, /__codexNativeNavigate\('\/'\)/);
+  assert.match(uiVerifier, /Main view remained on a settings route/);
+});
+
+test("runtime and UI verification bind DevTools to the configured desktop clone", () => {
+  const resolver = read("scripts/resolve-listening-process.cjs");
+  const runtimeVerifier = read("scripts/verify-runtime-services.cjs");
+  const uiVerifier = read("scripts/verify-current-ui.cjs");
+  assert.match(resolver, /Get-NetTCPConnection/);
+  assert.match(resolver, /Get-CimInstance Win32_Process/);
+  assert.doesNotMatch(resolver, /Select-Object -First 1/);
+  assert.match(resolver, /expectedExecutablePath/);
+  assert.match(resolver, /expectedUserDataPath/);
+  assert.match(resolver, /hostsForAddress/);
+  assert.match(resolver, /windowsHide: true/);
+  assert.match(runtimeVerifier, /resolveListeningProcess\(cdpPort, \{/);
+  assert.match(runtimeVerifier, /launcher\.codexExe/);
+  assert.match(runtimeVerifier, /launcher\.electronUserDataPath/);
+  assert.match(runtimeVerifier, /findPageTarget\(desktopProcess\)/);
+  assert.match(uiVerifier, /resolveListeningProcess\(port, \{/);
+  assert.match(uiVerifier, /launcher\.codexExe/);
+  assert.match(uiVerifier, /launcher\.electronUserDataPath/);
+  assert.match(uiVerifier, /pageTarget\(desktopProcess\)/);
 });
 
 test("Codex rollout indexing is bounded and import health is lightweight", () => {
@@ -63,21 +93,62 @@ test("source-only guard rejects distributable Codex artifacts and copied anchors
   assert.equal(report.ok, true);
 });
 
+test("managed runtime bridges reject stale source processes after rebuilds", () => {
+  const catalogShim = read("scripts/codex-all-chats-shim.cjs");
+  const catalogLauncher = read("scripts/start-codex-all-chats-shim.ps1");
+  const importManager = read("viewer/server.cjs");
+  const importLauncher = read("scripts/start-codex-import-manager.ps1");
+  const providerProxy = read("scripts/codex-responses-chat-proxy.cjs");
+  const providerLauncher = read("scripts/start-codex-provider-proxies.ps1");
+  const runtimeVerifier = read("scripts/verify-runtime-services.cjs");
+
+  assert.match(catalogShim, /runtimeSourceSha256/);
+  assert.match(catalogLauncher, /ExpectedRuntimeSourceHash/);
+  assert.match(catalogLauncher, /ExpectedUpstreamCli/);
+  assert.match(importManager, /importManagerSourceSha256/);
+  assert.match(importManager, /runtimeRoot: rootDir/);
+  assert.match(importLauncher, /Test-ImportManagerReady/);
+  assert.match(importLauncher, /ExpectedRuntimeRoot/);
+  assert.match(providerProxy, /proxySourceSha256/);
+  assert.match(providerProxy, /runtimeRoot/);
+  assert.match(providerLauncher, /ExpectedProxySourceSha256/);
+  assert.match(providerLauncher, /ExpectedRuntimeRoot/);
+  assert.match(runtimeVerifier, /Import manager is running stale source code/);
+  assert.match(runtimeVerifier, /Patch manager is running stale source code/);
+  assert.match(runtimeVerifier, /proxy is running stale source code/);
+  assert.match(runtimeVerifier, /belongs to a different patcher runtime/);
+  assert.match(runtimeVerifier, /catalog shim is running stale source code/);
+});
+
+test("source-only guard catches renamed copied minified anchors but permits authored replacements", () => {
+  const copied = `const harmlessName = "${"x".repeat(320)}";\nreplaceExactly(source, harmlessName, "authored", "test");`;
+  assert.equal(findEmbeddedUpstreamAnchors(copied).length, 1);
+  const authored = `const payload = "${"x".repeat(320)}";\nreplaceExactly(source, "short-anchor", payload, "test");`;
+  assert.equal(findEmbeddedUpstreamAnchors(authored).length, 0);
+});
+
 test("current update workflow is one-shot and preserves the verified clone", () => {
   const builder = read("scripts/build-patched-codex-app.cjs");
   const ensure = read("scripts/ensure-current-codex-patch.ps1");
   const launcher = read("scripts/launch-patched-codex.ps1");
-  const patcherUi = read("native-patches/codex-native-patcher-settings.js");
+  const patcherUi = read("features/core/patcher-ui/payload/codex-native-patcher-settings.js");
   const server = read("codex-viewer/server.cjs");
 
   assert.match(builder, /Every build gets a new immutable destination/);
   assert.match(builder, /buildNonce/);
   assert.match(ensure, /Global\\CodexPatchStudioCurrentBuild/);
   assert.match(ensure, /Test-ConfiguredPatchedCodexRunning/);
-  assert.match(launcher, /Resolve-UpdatePolicy/);
+  assert.match(launcher, /Resolve-CodexUpdatePolicy/);
   assert.match(launcher, /Show-CodexUpdatePrompt/);
+  assert.match(launcher, /Show-RepositoryUpdatePrompt/);
+  assert.match(ensure, /check-remote-update-channel\.cjs/);
+  assert.match(ensure, /Remote channel checker exited/);
+  assert.match(ensure, /remoteChannelEnabled/);
+  assert.match(ensure, /channel-disabled/);
   assert.match(patcherUi, /state\.updatePolicy !== "off"/);
-  assert.match(patcherUi, /Checks are one-shot at launch/);
+  assert.match(patcherUi, /GitHub is force-refreshed only when you press Check now/);
+  assert.match(patcherUi, /refreshRemote: true/);
+  assert.match(server, /payload\?\.refreshRemote === true/);
   assert.doesNotMatch(server, /spawnSync/);
 });
 
@@ -89,11 +160,19 @@ test("feature registry and authoring skills remain installed", () => {
   assert.match(read(".agents/skills/codex-patcher-contribute/SKILL.md"), /source-only/);
 });
 
+test("the default test command includes feature-local module tests", () => {
+  const packageJson = JSON.parse(read("package.json"));
+  const runner = read("scripts/run-tests.cjs");
+  assert.equal(packageJson.scripts.test, "node scripts/run-tests.cjs");
+  assert.match(runner, /path\.join\(rootDir, "features"\)/);
+  assert.match(runner, /entry\.name\.endsWith\("\.test\.cjs"\)/);
+});
+
 test("all native feature payloads remain present", () => {
-  const provider = read("native-patches/codex-native-provider-settings.js");
-  const orchestrator = read("native-patches/codex-native-orchestrator.js");
-  const imports = read("native-patches/codex-native-import-settings.js");
-  const patcher = read("native-patches/codex-native-patcher-settings.js");
+  const provider = read("features/core/provider-suite/payload/codex-native-provider-settings.js");
+  const orchestrator = read("features/core/orchestrations/payload/codex-native-orchestrator.js");
+  const imports = read("features/core/imports/payload/codex-native-import-settings.js");
+  const patcher = read("features/core/patcher-ui/payload/codex-native-patcher-settings.js");
 
   for (const marker of [
     "DeepSeek",
@@ -120,13 +199,16 @@ test("all native feature payloads remain present", () => {
 
 test("native payload JavaScript parses", () => {
   for (const relativePath of [
-    "native-patches/codex-native-provider-settings.js",
-    "native-patches/codex-native-orchestrator.js",
-    "native-patches/codex-native-import-settings.js",
-    "native-patches/codex-native-patcher-settings.js",
+    "features/core/provider-suite/payload/codex-native-provider-settings.js",
+    "features/core/orchestrations/payload/codex-native-orchestrator.js",
+    "features/core/imports/payload/codex-native-import-settings.js",
+    "features/core/patcher-ui/payload/codex-native-patcher-settings.js",
     "scripts/build-patched-codex-app.cjs",
     "scripts/codex-responses-chat-proxy.cjs",
     "scripts/export-augment-webview-state.cjs",
+    "scripts/resolve-listening-process.cjs",
+    "scripts/check-remote-update-channel.cjs",
+    "scripts/generate-update-channel.cjs",
     "scripts/verify-portable-payload.cjs",
     "scripts/verify-runtime-services.cjs",
   ]) {
@@ -142,4 +224,60 @@ test("compatibility contract records structural verification", () => {
   assert.ok(compatibility.requiredFeatures.includes("provider-and-model-picker"));
   assert.ok(compatibility.requiredFeatures.includes("orchestrations"));
   assert.ok(compatibility.requiredFeatures.includes("chat-imports"));
+  assert.ok(compatibility.requiredFeatures.includes("remote-update-channel"));
+});
+
+test("the committed GitHub update channel matches local compatibility metadata", () => {
+  const checker = path.join(root, "scripts", "generate-update-channel.cjs");
+  const result = spawnSync(process.execPath, [checker], {
+    cwd: root,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const ciResult = spawnSync(process.execPath, [checker], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, GITHUB_SHA: "f".repeat(40), GITEA_COMMIT: "e".repeat(40) },
+    windowsHide: true,
+  });
+  assert.equal(ciResult.status, 0, ciResult.stderr || ciResult.stdout);
+  const channel = JSON.parse(read("update-channel/stable.json"));
+  assert.equal(channel.channel, "stable");
+  assert.equal(channel.patcher.version, JSON.parse(read("package.json")).version);
+  assert.equal(channel.patcher.sourceSha256, patcherFingerprint(root).sha256);
+});
+
+test("source fingerprints normalize text line endings while preserving binary bytes", () => {
+  assert.equal(normalizeManifestText("{\r\n  \"ok\": true\r\n}\r\n"), "{\n  \"ok\": true\n}\n");
+  assert.deepEqual(
+    canonicalSourceBytes("payload/example.js", Buffer.from("const value = 1;\r\n", "utf8")),
+    canonicalSourceBytes("payload/example.js", Buffer.from("const value = 1;\n", "utf8")),
+  );
+
+  const binary = Buffer.from([0x00, 0x0d, 0x0a, 0x80, 0xff]);
+  assert.deepEqual(canonicalSourceBytes("tools/launcher.sfx", binary), binary);
+
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-source-fingerprint-"));
+  const lfRoot = path.join(tempRoot, "lf");
+  const crlfRoot = path.join(tempRoot, "crlf");
+  try {
+    for (const directory of [lfRoot, crlfRoot]) {
+      fs.mkdirSync(path.join(directory, "payload"), { recursive: true });
+    }
+    fs.writeFileSync(path.join(lfRoot, "feature.json"), "{\n  \"id\": \"example\"\n}\n", "utf8");
+    fs.writeFileSync(path.join(crlfRoot, "feature.json"), "{\r\n  \"id\": \"example\"\r\n}\r\n", "utf8");
+    fs.writeFileSync(path.join(lfRoot, "payload", "index.js"), "module.exports = true;\n", "utf8");
+    fs.writeFileSync(path.join(crlfRoot, "payload", "index.js"), "module.exports = true;\r\n", "utf8");
+    fs.writeFileSync(path.join(lfRoot, "payload", ".gitkeep"), "\n", "utf8");
+    fs.writeFileSync(path.join(crlfRoot, "payload", ".gitkeep"), "\r\n", "utf8");
+    fs.writeFileSync(path.join(lfRoot, "payload", "launcher.sfx"), binary);
+    fs.writeFileSync(path.join(crlfRoot, "payload", "launcher.sfx"), binary);
+
+    assert.equal(hashDirectory(lfRoot), hashDirectory(crlfRoot));
+    fs.writeFileSync(path.join(crlfRoot, "payload", "launcher.sfx"), Buffer.concat([binary, Buffer.from([0x01])]));
+    assert.notEqual(hashDirectory(lfRoot), hashDirectory(crlfRoot));
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
 });

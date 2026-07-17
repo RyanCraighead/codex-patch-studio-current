@@ -149,6 +149,68 @@ function Get-Sha256Hex {
   }
 }
 
+function Test-SameResolvedPath {
+  param(
+    [string]$Left,
+    [string]$Right
+  )
+  if (-not $Left -or -not $Right) {
+    return $false
+  }
+  return [string]::Equals(
+    [System.IO.Path]::GetFullPath($Left).TrimEnd('\', '/'),
+    [System.IO.Path]::GetFullPath($Right).TrimEnd('\', '/'),
+    [System.StringComparison]::OrdinalIgnoreCase
+  )
+}
+
+function Get-SafeSourceProvenance {
+  $commit = (@(& git -C $RepoRoot rev-parse HEAD 2>$null) -join "`n").Trim()
+  if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[a-fA-F0-9]{40,64}$') {
+    throw "Could not resolve a valid Git commit for portable source provenance. Package from a Git checkout."
+  }
+
+  $remote = (@(& git -C $RepoRoot remote get-url origin 2>$null) -join "`n").Trim()
+  if ($LASTEXITCODE -ne 0 -or -not $remote) {
+    throw "Could not resolve the origin remote for portable source provenance."
+  }
+  if ([System.IO.Path]::IsPathRooted($remote) -or $remote -match '^(?:file:|\\\\|\.{1,2}[\\/])') {
+    throw "The origin remote is a local filesystem path and cannot be embedded in a portable bundle."
+  }
+
+  $safeRemote = $remote
+  $parsedRemote = $null
+  if ([System.Uri]::TryCreate($remote, [System.UriKind]::Absolute, [ref]$parsedRemote)) {
+    if ($parsedRemote.Scheme -eq 'file') {
+      throw "A file:// origin remote cannot be embedded in a portable bundle."
+    }
+    $builder = [System.UriBuilder]::new($parsedRemote)
+    $builder.UserName = ""
+    $builder.Password = ""
+    $builder.Query = ""
+    $builder.Fragment = ""
+    $safeRemote = $builder.Uri.AbsoluteUri.TrimEnd('/')
+  } elseif ($remote -notmatch '^[^@\s/:]+@[^\s/:]+:[^\s]+$') {
+    throw "The origin remote is not a safe HTTP(S), SSH, or Git remote URL."
+  }
+
+  $branch = (@(& git -C $RepoRoot branch --show-current 2>$null) -join "`n").Trim()
+  if ($LASTEXITCODE -ne 0) {
+    $branch = ""
+  }
+  $dirtyOutput = @(& git -C $RepoRoot status --porcelain --untracked-files=normal 2>$null)
+  if ($LASTEXITCODE -ne 0) {
+    throw "Could not determine source worktree status for portable provenance."
+  }
+
+  return [ordered]@{
+    repository = $safeRemote
+    commit = $commit.ToLowerInvariant()
+    branch = if ($branch) { $branch } else { $null }
+    dirty = ($dirtyOutput.Count -gt 0)
+  }
+}
+
 function Find-SevenZipTool {
   $candidates = @(
     (Join-Path $env:ProgramFiles "7-Zip\7z.exe"),
@@ -244,6 +306,7 @@ $shareChatDatabaseWithStock = Get-ExplicitBooleanSetting `
   -Configs @($config, $projectConfig) `
   -Name "shareChatDatabaseWithStock" `
   -Default $false
+$portableElectronProfileEnabled = $PortableElectronProfile.IsPresent
 $sourceAppDir = [string]$config.appDir
 if (-not $sourceAppDir -or -not (Test-Path -LiteralPath $sourceAppDir)) {
   throw "Patched app directory not found from launcher config: $sourceAppDir"
@@ -265,6 +328,31 @@ $sourceAppAsar = Join-Path $sourceAppDir "resources\app.asar"
 if (-not (Test-Path -LiteralPath $sourceAppAsar)) {
   throw "Patched app.asar not found: $sourceAppAsar"
 }
+
+$sourceCloneRoot = [string]$config.cloneRoot
+if (-not $sourceCloneRoot -or -not (Test-SameResolvedPath -Left $sourceCloneRoot -Right (Split-Path -Parent $sourceAppDir))) {
+  throw "Launcher cloneRoot does not match the patched app directory being packaged."
+}
+$sourcePatchManifestPath = Join-Path $sourceCloneRoot "patch-manifest.json"
+if (-not (Test-Path -LiteralPath $sourcePatchManifestPath -PathType Leaf)) {
+  throw "Verified source patch manifest not found: $sourcePatchManifestPath"
+}
+$sourcePatchManifest = Get-Content -LiteralPath $sourcePatchManifestPath -Raw | ConvertFrom-Json
+if (
+  -not (Test-SameResolvedPath -Left ([string]$sourcePatchManifest.cloneRoot) -Right $sourceCloneRoot) -or
+  -not (Test-SameResolvedPath -Left ([string]$sourcePatchManifest.codexExe) -Right $sourceCodexExe) -or
+  ([string]$sourcePatchManifest.sourceVersion -ne [string]$config.sourceVersion) -or
+  ([string]$sourcePatchManifest.sourceAsarSha256 -ne [string]$config.sourceAsarSha256) -or
+  ([string]$sourcePatchManifest.sourceAppServerCliSha256 -ne [string]$config.sourceAppServerCliSha256) -or
+  ([string]$sourcePatchManifest.patcherSource.sha256 -ne [string]$config.patcherSource.sha256)
+) {
+  throw "Source patch manifest identity does not match the promoted launcher configuration."
+}
+$featureModuleApplication = @($sourcePatchManifest.featureModuleApplication)
+if (@($config.featureModules | Where-Object { $_.enabled -eq $true }).Count -gt 0 -and $featureModuleApplication.Count -eq 0) {
+  throw "Source patch manifest is missing per-feature application evidence."
+}
+$sourceProvenance = Get-SafeSourceProvenance
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
@@ -311,6 +399,9 @@ New-Item -ItemType Directory -Force -Path $payloadScriptsDir | Out-Null
 $runtimeScripts = @(
   "codex-launcher.ps1",
   "launch-patched-codex.ps1",
+  "codex-update-policy.psm1",
+  "check-remote-update-channel.cjs",
+  "generate-update-channel.cjs",
   "initialize-patched-codex-home.ps1",
   "start-codex-provider-proxies.ps1",
   "start-codex-import-manager.ps1",
@@ -319,8 +410,19 @@ $runtimeScripts = @(
   "codex-all-chats-shim.cjs",
   "codex-responses-chat-proxy.cjs",
   "build-patched-codex-app.cjs",
+  "atomic-json.cjs",
+  "build-lock.cjs",
   "feature-registry.cjs",
+  "feature-development-workflow.cjs",
+  "run-tests.cjs",
+  "check-source-only.cjs",
   "patcher-fingerprint.cjs",
+  "packed-verification-contract.cjs",
+  "verify-portable-payload.cjs",
+  "verify-current-patched-build.cjs",
+  "verify-runtime-services.cjs",
+  "verify-current-ui.cjs",
+  "resolve-listening-process.cjs",
   "ensure-current-codex-patch.ps1",
   "create-patched-codex-shortcut.ps1",
   "package-patched-codex-single-exe.ps1",
@@ -372,10 +474,26 @@ $payloadToolsDir = Join-Path $payloadRoot "tools"
 New-Item -ItemType Directory -Force -Path $payloadToolsDir | Out-Null
 $sqliteTool = Find-SqliteTool
 Copy-Item -LiteralPath $sqliteTool -Destination (Join-Path $payloadToolsDir "sqlite3.exe") -Force
+$sevenZipSfx = Find-SevenZipSfx
+Copy-Item `
+  -LiteralPath $sevenZipSfx `
+  -Destination (Join-Path $payloadToolsDir "7z-sfx-as-invoker.sfx") `
+  -Force
+
+$payloadPortableAssetsDir = Join-Path $payloadRoot "assets\portable"
+New-Item -ItemType Directory -Force -Path $payloadPortableAssetsDir | Out-Null
+$bootstrapLauncherSource = Join-Path $RepoRoot "assets\portable\bootstrap-launcher.cs"
+if (-not (Test-Path -LiteralPath $bootstrapLauncherSource -PathType Leaf)) {
+  throw "Portable bootstrap launcher source missing: $bootstrapLauncherSource"
+}
+Copy-Item `
+  -LiteralPath $bootstrapLauncherSource `
+  -Destination (Join-Path $payloadPortableAssetsDir "bootstrap-launcher.cs") `
+  -Force
 
 $payloadConfigDir = Join-Path $payloadRoot "config"
 New-Item -ItemType Directory -Force -Path $payloadConfigDir | Out-Null
-foreach ($configName in @("patcher.json", "compatibility.json")) {
+foreach ($configName in @("patcher.json", "compatibility.json", "update-channel.json")) {
   $sourceConfig = Join-Path $RepoRoot "config\$configName"
   if (-not (Test-Path -LiteralPath $sourceConfig)) {
     throw "Required patcher config missing: $sourceConfig"
@@ -385,14 +503,19 @@ foreach ($configName in @("patcher.json", "compatibility.json")) {
 $payloadPatcherConfigPath = Join-Path $payloadConfigDir "patcher.json"
 $payloadPatcherConfig = Get-Content -LiteralPath $payloadPatcherConfigPath -Raw | ConvertFrom-Json
 $shareProperty = $payloadPatcherConfig.PSObject.Properties["shareChatDatabaseWithStock"]
+$rewritePatcherConfig = $false
 if ($null -eq $shareProperty) {
   $payloadPatcherConfig | Add-Member -NotePropertyName "shareChatDatabaseWithStock" -NotePropertyValue $shareChatDatabaseWithStock
-} else {
+  $rewritePatcherConfig = $true
+} elseif ($shareProperty.Value -ne $shareChatDatabaseWithStock) {
   $shareProperty.Value = $shareChatDatabaseWithStock
+  $rewritePatcherConfig = $true
 }
-Write-Utf8NoBom `
-  -Path $payloadPatcherConfigPath `
-  -Value ($payloadPatcherConfig | ConvertTo-Json -Depth 20)
+if ($rewritePatcherConfig) {
+  Write-Utf8NoBom `
+    -Path $payloadPatcherConfigPath `
+    -Value ($payloadPatcherConfig | ConvertTo-Json -Depth 20)
+}
 
 Invoke-RobocopyChecked `
   -Source (Join-Path $RepoRoot "viewer") `
@@ -414,6 +537,11 @@ Invoke-RobocopyChecked `
   -Target (Join-Path $payloadRoot "features") `
   -ExcludeFiles @("*.log")
 
+Invoke-RobocopyChecked `
+  -Source (Join-Path $RepoRoot "update-channel") `
+  -Target (Join-Path $payloadRoot "update-channel") `
+  -ExcludeFiles @("*.log")
+
 $fingerprintNode = @(
   (Join-Path $payloadRoot "app\resources\cua_node\bin\node.exe"),
   (Join-Path $payloadRoot "app\resources\node.exe"),
@@ -423,6 +551,11 @@ $fingerprintNode = @(
 if (-not $fingerprintNode) {
   throw "Node.js was not found for computing the packaged patcher fingerprint."
 }
+$patchedAppAsarPath = Join-Path $payloadRoot "app\resources\app.asar"
+if (-not (Test-Path -LiteralPath $patchedAppAsarPath -PathType Leaf)) {
+  throw "Staged patched app.asar is missing: $patchedAppAsarPath"
+}
+$patchedAppAsarSha256 = Get-Sha256Hex -Path $patchedAppAsarPath
 $patcherSource = & $fingerprintNode (Join-Path $payloadRoot "scripts\patcher-fingerprint.cjs") | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or -not $patcherSource.sha256) {
   throw "Could not compute the packaged patcher source fingerprint."
@@ -437,33 +570,98 @@ $sourceManifest = [ordered]@{
   sourceVersion = $version
   sourceDesktopExecutableName = Split-Path -Leaf $sourceCodexExe
   sourceAsarSha256 = [string]$config.sourceAsarSha256
+  patchedAppAsarSha256 = $patchedAppAsarSha256
   sourceDesktopExeSha256 = [string]$config.sourceDesktopExeSha256
   sourceAppServerCliSha256 = [string]$config.sourceAppServerCliSha256
   patcherSource = $patcherSource
+  sourceProvenance = $sourceProvenance
   limit = if ($config.limit) { [int]$config.limit } else { 1000 }
   features = $config.features
   featureModules = $config.featureModules
+  featureModuleApplication = $featureModuleApplication
+  packedVerification = $config.packedVerification
   catalogShim = $config.catalogShim
   shareChatDatabaseWithStock = $shareChatDatabaseWithStock
+  portableElectronProfile = $portableElectronProfileEnabled
 }
-$sourceManifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $payloadRoot "bundle-source.json") -Encoding UTF8
+$sourceManifestJson = $sourceManifest | ConvertTo-Json -Depth 20
+Write-Utf8NoBom -Path (Join-Path $payloadRoot "bundle-source.json") -Value $sourceManifestJson
+
+$payloadVerifierPath = Join-Path $payloadRoot "scripts\verify-portable-payload.cjs"
+Write-Host "Verifying dormant portable payload before compression."
+$dormantVerificationJson = & $fingerprintNode $payloadVerifierPath $payloadRoot
+$dormantVerificationExitCode = $LASTEXITCODE
+if ($dormantVerificationExitCode -ne 0) {
+  throw "Dormant portable payload verification failed with exit code $dormantVerificationExitCode."
+}
+try {
+  $dormantVerification = ($dormantVerificationJson -join [Environment]::NewLine) | ConvertFrom-Json
+} catch {
+  throw "Dormant portable payload verification returned invalid JSON: $($_.Exception.Message)"
+}
+if (
+  ($dormantVerification.ok -isnot [bool]) -or
+  (-not [bool]$dormantVerification.ok) -or
+  ([string]$dormantVerification.verificationMode -ne "dormant-payload") -or
+  ($dormantVerification.generatedLauncherConfigPresent -ne $false)
+) {
+  throw "Dormant portable payload verification did not return an explicit clean dormant-payload result."
+}
 
 Write-Host "Compressing payload with long-path-safe 7-Zip. This can take a few minutes."
 $sevenZip = Find-SevenZipTool
-$sevenZipSfx = Find-SevenZipSfx
 $bundledSevenZip = Join-Path $sfxRoot "7z.exe"
 Copy-Item -LiteralPath $sevenZip -Destination $bundledSevenZip -Force
-$innerSevenZipArgs = @(
-  "a",
-  "-t7z",
-  "-mx=7",
-  "-mmt=on",
-  $payloadArchive,
-  (Join-Path $payloadRoot "*")
+$compressionProfiles = @(
+  [pscustomobject]@{
+    name = "fast-lzma2"
+    args = @("-mx=1", "-m0=lzma2", "-md=32m", "-mmt=1")
+  },
+  [pscustomobject]@{
+    name = "store-fallback"
+    args = @("-mx=0", "-mmt=1")
+  }
 )
-& $sevenZip @innerSevenZipArgs | Out-Null
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $payloadArchive)) {
-  throw "7-Zip payload compression failed with exit code $LASTEXITCODE."
+
+$compressionSucceeded = $false
+$compressionProfileName = $null
+$compressionFailureSummaries = @()
+$compressionLogsRoot = Join-Path $workRoot "logs"
+New-Item -ItemType Directory -Force -Path $compressionLogsRoot | Out-Null
+foreach ($profile in $compressionProfiles) {
+  if (Test-Path -LiteralPath $payloadArchive) {
+    Remove-Item -LiteralPath $payloadArchive -Force
+  }
+
+  $compressionLogPath = Join-Path $compressionLogsRoot ("payload-compression-{0}.log" -f $profile.name)
+  $compressionTestLogPath = Join-Path $compressionLogsRoot ("payload-compression-{0}-test.log" -f $profile.name)
+  $innerSevenZipArgs = @("a", "-t7z") + @($profile.args) + @(
+    $payloadArchive,
+    (Join-Path $payloadRoot "*")
+  )
+  $compressionOutput = @(& $sevenZip @innerSevenZipArgs 2>&1)
+  $compressionExitCode = $LASTEXITCODE
+  $compressionOutput | ForEach-Object { $_.ToString() } | Set-Content -LiteralPath $compressionLogPath -Encoding UTF8
+
+  if ($compressionExitCode -eq 0 -and (Test-Path -LiteralPath $payloadArchive -PathType Leaf)) {
+    $compressionTestOutput = @(& $sevenZip "t" $payloadArchive 2>&1)
+    $compressionTestExitCode = $LASTEXITCODE
+    $compressionTestOutput | ForEach-Object { $_.ToString() } | Set-Content -LiteralPath $compressionTestLogPath -Encoding UTF8
+    if ($compressionTestExitCode -eq 0) {
+      $compressionSucceeded = $true
+      $compressionProfileName = [string]$profile.name
+      break
+    }
+    $compressionFailureSummaries += "$($profile.name): integrity test exit $compressionTestExitCode; log $compressionTestLogPath"
+  } else {
+    $compressionFailureSummaries += "$($profile.name): compression exit $compressionExitCode; log $compressionLogPath"
+  }
+
+  Write-Warning "7-Zip profile '$($profile.name)' failed. Retrying with the next safe profile."
+}
+
+if (-not $compressionSucceeded) {
+  throw "7-Zip payload compression failed. $($compressionFailureSummaries -join '; ')"
 }
 $payloadHash = Get-Sha256Hex -Path $payloadArchive
 $extractorHash = Get-Sha256Hex -Path $bundledSevenZip
@@ -481,17 +679,23 @@ $manifest = [ordered]@{
   sourceVersion = $sourceManifest.sourceVersion
   sourceDesktopExecutableName = $sourceManifest.sourceDesktopExecutableName
   sourceAsarSha256 = $sourceManifest.sourceAsarSha256
+  patchedAppAsarSha256 = $sourceManifest.patchedAppAsarSha256
   sourceDesktopExeSha256 = $sourceManifest.sourceDesktopExeSha256
   sourceAppServerCliSha256 = $sourceManifest.sourceAppServerCliSha256
   patcherSource = $sourceManifest.patcherSource
+  sourceProvenance = $sourceManifest.sourceProvenance
   limit = $sourceManifest.limit
   features = $sourceManifest.features
   featureModules = $sourceManifest.featureModules
+  featureModuleApplication = $sourceManifest.featureModuleApplication
+  packedVerification = $sourceManifest.packedVerification
   catalogShim = $sourceManifest.catalogShim
   shareChatDatabaseWithStock = $sourceManifest.shareChatDatabaseWithStock
+  portableElectronProfile = $sourceManifest.portableElectronProfile
+  payloadCompressionProfile = $compressionProfileName
 }
 $manifestJson = $manifest | ConvertTo-Json -Depth 20
-Set-Content -LiteralPath $manifestPath -Value $manifestJson -Encoding UTF8
+Write-Utf8NoBom -Path $manifestPath -Value $manifestJson
 
 $bootstrap = @'
 $ErrorActionPreference = "Stop"
@@ -502,6 +706,15 @@ function Write-BundleLog {
   New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
   $line = "[{0}] {1}" -f (Get-Date).ToString("yyyy-MM-dd HH:mm:ss.fff"), $Message
   Add-Content -LiteralPath (Join-Path $logRoot "codex-patch-studio-current-bundle.log") -Value $line -Encoding UTF8
+}
+
+function Write-Utf8NoBom {
+  param(
+    [string]$Path,
+    [string]$Value
+  )
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Value, $encoding)
 }
 
 function Assert-ChildPath {
@@ -553,6 +766,9 @@ function Get-Sha256Hex {
   }
 }
 
+$bundleMutex = $null
+$bundleMutexAcquired = $false
+
 try {
   $sfxRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
   $manifestPath = Join-Path $sfxRoot "bundle-manifest.json"
@@ -560,6 +776,10 @@ try {
     throw "Bundle manifest missing: $manifestPath"
   }
   $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+  if ($manifest.portableElectronProfile -isnot [bool]) {
+    throw "Bundle manifest portableElectronProfile must be true or false."
+  }
+  $portableElectronProfile = [bool]$manifest.portableElectronProfile
   $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
   $bundleDataRoot = Resolve-BundleDataRoot -Manifest $manifest -LocalAppData $localAppData
   $bundleBase = Join-Path $bundleDataRoot "bundled-apps"
@@ -568,6 +788,23 @@ try {
   $profileRoot = Join-Path $profileBase ([string]$manifest.bundleId)
   Assert-ChildPath -Base $bundleBase -Path $targetRoot
   Assert-ChildPath -Base $profileBase -Path $profileRoot
+
+  $mutexToken = ([string]$manifest.bundleId -replace '[^A-Za-z0-9_.-]', '_')
+  if (-not $mutexToken) {
+    throw "Bundle manifest has an invalid bundleId for extraction locking."
+  }
+  $mutexName = "Local\CodexPatchStudioCurrent.Bundle.$mutexToken"
+  $bundleMutex = [System.Threading.Mutex]::new($false, $mutexName)
+  try {
+    $bundleMutexAcquired = $bundleMutex.WaitOne([TimeSpan]::FromMinutes(10))
+  } catch [System.Threading.AbandonedMutexException] {
+    $bundleMutexAcquired = $true
+    Write-BundleLog "Recovered abandoned bundle extraction lock $mutexName."
+  }
+  if (-not $bundleMutexAcquired) {
+    throw "Timed out waiting for bundle extraction lock $mutexName."
+  }
+
   New-Item -ItemType Directory -Force -Path $bundleBase, $profileRoot | Out-Null
 
   $desktopExecutableName = [string]$manifest.sourceDesktopExecutableName
@@ -581,9 +818,15 @@ try {
   if (-not $desktopExecutablePresent -and $allowLegacyDesktopFallback) {
     $desktopExecutablePresent = Test-Path -LiteralPath $legacyCodexExe -PathType Leaf
   }
+  $appAsarPath = Join-Path $targetRoot "app\resources\app.asar"
+  $launchScriptPath = Join-Path $targetRoot "scripts\launch-patched-codex.ps1"
+  $runtimePayloadPresent = `
+    $desktopExecutablePresent -and `
+    (Test-Path -LiteralPath $appAsarPath -PathType Leaf) -and `
+    (Test-Path -LiteralPath $launchScriptPath -PathType Leaf)
   $markerPath = Join-Path $targetRoot ".bundle-complete.json"
   $needsExtract = $true
-  if ((Test-Path -LiteralPath $markerPath) -and $desktopExecutablePresent) {
+  if ((Test-Path -LiteralPath $markerPath) -and $runtimePayloadPresent) {
     try {
       $marker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
       $needsExtract = ([string]$marker.payloadSha256 -ne [string]$manifest.payloadSha256)
@@ -618,12 +861,26 @@ try {
     if ($LASTEXITCODE -ne 0) {
       throw "Bundled payload extraction failed with exit code $LASTEXITCODE."
     }
-    [ordered]@{
+    $desktopExecutablePresent = Test-Path -LiteralPath $codexExe -PathType Leaf
+    if (-not $desktopExecutablePresent -and $allowLegacyDesktopFallback) {
+      $desktopExecutablePresent = Test-Path -LiteralPath $legacyCodexExe -PathType Leaf
+    }
+    if (-not $desktopExecutablePresent) {
+      throw "Bundled desktop executable missing after extraction: $codexExe"
+    }
+    if (-not (Test-Path -LiteralPath $appAsarPath -PathType Leaf)) {
+      throw "Bundled app.asar missing after extraction: $appAsarPath"
+    }
+    if (-not (Test-Path -LiteralPath $launchScriptPath -PathType Leaf)) {
+      throw "Bundled launch script missing after extraction: $launchScriptPath"
+    }
+    $markerJson = [ordered]@{
       bundleId = [string]$manifest.bundleId
       bundleName = [string]$manifest.bundleName
       payloadSha256 = [string]$manifest.payloadSha256
       extractedAt = (Get-Date).ToUniversalTime().ToString("o")
-    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $markerPath -Encoding UTF8
+    } | ConvertTo-Json -Depth 6
+    Write-Utf8NoBom -Path $markerPath -Value $markerJson
   } else {
     Write-BundleLog "Using existing extracted bundle at $targetRoot"
   }
@@ -641,7 +898,19 @@ try {
   $appDir = Join-Path $targetRoot "app"
   $resourcesDir = Join-Path $appDir "resources"
   $patchedCodexHome = Join-Path $profileRoot "codex-home"
-  $electronUserDataPath = Join-Path $profileRoot "electron-user-data"
+  $portableElectronUserDataPath = Join-Path $profileRoot "electron-user-data"
+  $stableElectronProfileRoot = Join-Path $localAppData "CodexPatchStudioCurrent"
+  $stableElectronUserDataPath = Join-Path $stableElectronProfileRoot "electron-user-data"
+  $electronUserDataPath = if ($portableElectronProfile) {
+    $portableElectronUserDataPath
+  } else {
+    $stableElectronUserDataPath
+  }
+  $electronProfileMode = if ($portableElectronProfile) {
+    "isolated-per-bundle"
+  } else {
+    "stable-local-app-data"
+  }
   $isolatedSqliteHome = Join-Path $profileRoot "chat-database"
   New-Item `
     -ItemType Directory `
@@ -664,19 +933,25 @@ try {
     limit = [int]$manifest.limit
     features = $manifest.features
     featureModules = $manifest.featureModules
+    featureModuleApplication = $manifest.featureModuleApplication
+    packedVerification = $manifest.packedVerification
     builtAt = [string]$manifest.packagedAt
     bundleId = [string]$manifest.bundleId
     bundleName = [string]$manifest.bundleName
     bundleDataRoot = $bundleDataRoot
     profileRoot = $profileRoot
+    portableElectronProfile = $portableElectronProfile
+    electronProfileMode = $electronProfileMode
     sourcePackageDirName = [string]$manifest.sourcePackageDirName
     sourceMode = "bundled-snapshot"
     sourceVersion = [string]$manifest.sourceVersion
     sourceDesktopExecutableName = $desktopExecutableName
     sourceAsarSha256 = [string]$manifest.sourceAsarSha256
+    patchedAppAsarSha256 = [string]$manifest.patchedAppAsarSha256
     sourceDesktopExeSha256 = [string]$manifest.sourceDesktopExeSha256
     sourceAppServerCliSha256 = [string]$manifest.sourceAppServerCliSha256
     patcherSource = $manifest.patcherSource
+    sourceProvenance = $manifest.sourceProvenance
     cloneRoot = $targetRoot
     appDir = $appDir
     resourcesDir = $resourcesDir
@@ -697,14 +972,18 @@ try {
     appAsar = (Join-Path $resourcesDir "app.asar")
     originalAppAsarBackup = $null
   }
-  $launcherConfig | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $targetRoot "codex-launcher.local.json") -Encoding UTF8
+  $launcherConfigPath = Join-Path $targetRoot "codex-launcher.local.json"
+  $launcherConfigJson = $launcherConfig | ConvertTo-Json -Depth 20
+  Write-Utf8NoBom -Path $launcherConfigPath -Value $launcherConfigJson
 
   $runtimePatchManifest = [ordered]@{}
   foreach ($entry in $launcherConfig.GetEnumerator()) {
     $runtimePatchManifest[$entry.Key] = $entry.Value
   }
   $runtimePatchManifest["payloadSha256"] = [string]$manifest.payloadSha256
-  $runtimePatchManifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $targetRoot "patch-manifest.json") -Encoding UTF8
+  $runtimePatchManifestPath = Join-Path $targetRoot "patch-manifest.json"
+  $runtimePatchManifestJson = $runtimePatchManifest | ConvertTo-Json -Depth 20
+  Write-Utf8NoBom -Path $runtimePatchManifestPath -Value $runtimePatchManifestJson
 
   $bundledNodeCandidates = @(
     (Join-Path $resourcesDir "cua_node\bin\node.exe"),
@@ -734,7 +1013,7 @@ try {
   if (-not (Test-Path -LiteralPath $powershellExe)) {
     $powershellExe = "powershell.exe"
   }
-  Write-BundleLog "Starting bundled patched Codex from $targetRoot with CODEX_HOME=$patchedCodexHome, Electron profile=$electronUserDataPath, SQLite home=$sqliteHome, share stock chat DB=$shareChatDatabaseWithStock"
+  Write-BundleLog "Starting bundled patched Codex from $targetRoot with CODEX_HOME=$patchedCodexHome, Electron profile mode=$electronProfileMode, Electron profile=$electronUserDataPath, SQLite home=$sqliteHome, share stock chat DB=$shareChatDatabaseWithStock"
   Start-Process `
     -FilePath $powershellExe `
     -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launchScript`"" `
@@ -743,6 +1022,16 @@ try {
 } catch {
   Write-BundleLog "Bundle launch failed: $($_.Exception.Message)"
   throw
+} finally {
+  if ($bundleMutexAcquired -and $null -ne $bundleMutex) {
+    try {
+      $bundleMutex.ReleaseMutex()
+    } catch {
+    }
+  }
+  if ($null -ne $bundleMutex) {
+    $bundleMutex.Dispose()
+  }
 }
 '@
 Write-Utf8NoBom -Path $bootstrapPath -Value $bootstrap
@@ -792,8 +1081,10 @@ $result = [ordered]@{
   sourceVersion = $version
   sourceDesktopExecutableName = Split-Path -Leaf $sourceCodexExe
   shareChatDatabaseWithStock = $shareChatDatabaseWithStock
+  portableElectronProfile = $portableElectronProfileEnabled
+  payloadCompressionProfile = $compressionProfileName
   sfxMode = "7zip"
-  profileMode = "isolated-per-bundle"
+  profileMode = if ($portableElectronProfileEnabled) { "isolated-per-bundle" } else { "stable-local-app-data" }
 }
 
 if (-not $KeepWork) {
