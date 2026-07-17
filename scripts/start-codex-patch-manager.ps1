@@ -53,7 +53,13 @@ function Get-Sha256Hex {
 
 $expectedSourceSha256 = Get-Sha256Hex -Path $PatchManagerScript
 $currentHealth = Get-PatchManagerHealth
-if ($currentHealth -and ([string]$currentHealth.patchManagerSourceSha256).ToLowerInvariant() -eq $expectedSourceSha256) {
+if (
+  $currentHealth -and
+  ([string]$currentHealth.patchManagerSourceSha256).ToLowerInvariant() -eq $expectedSourceSha256 -and
+  [string]$currentHealth.runtimePaths.repoRoot -and
+  [System.IO.Path]::GetFullPath([string]$currentHealth.runtimePaths.repoRoot).TrimEnd('\') -ieq
+    [System.IO.Path]::GetFullPath($RepoRoot).TrimEnd('\')
+) {
   return
 }
 
@@ -61,7 +67,13 @@ Stop-StalePatchManager
 Start-Sleep -Milliseconds 250
 
 $currentHealth = Get-PatchManagerHealth
-if ($currentHealth -and ([string]$currentHealth.patchManagerSourceSha256).ToLowerInvariant() -eq $expectedSourceSha256) {
+if (
+  $currentHealth -and
+  ([string]$currentHealth.patchManagerSourceSha256).ToLowerInvariant() -eq $expectedSourceSha256 -and
+  [string]$currentHealth.runtimePaths.repoRoot -and
+  [System.IO.Path]::GetFullPath([string]$currentHealth.runtimePaths.repoRoot).TrimEnd('\') -ieq
+    [System.IO.Path]::GetFullPath($RepoRoot).TrimEnd('\')
+) {
   return
 }
 

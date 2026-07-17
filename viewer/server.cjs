@@ -2953,6 +2953,7 @@ async function handleApi(request, requestUrl, response) {
       service: "codex-import-manager",
       pid: process.pid,
       sourceSha256: importManagerSourceSha256,
+      runtimeRoot: rootDir,
     });
     return;
   }

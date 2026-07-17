@@ -40,7 +40,8 @@ function Test-ProviderProxyReady {
   param(
     [string]$Provider,
     [int]$Port,
-    [string]$ExpectedSourceSha256
+    [string]$ExpectedSourceSha256,
+    [string]$ExpectedRuntimeRoot
   )
   $health = Get-ProviderProxyHealth "http://127.0.0.1:$Port/health"
   return (
@@ -48,6 +49,9 @@ function Test-ProviderProxyReady {
     $health.ok -eq $true -and
     $health.provider -eq $Provider -and
     [string]$health.sourceSha256 -eq $ExpectedSourceSha256 -and
+    [string]$health.runtimeRoot -and
+    [System.IO.Path]::GetFullPath([string]$health.runtimeRoot).TrimEnd('\') -ieq
+      [System.IO.Path]::GetFullPath($ExpectedRuntimeRoot).TrimEnd('\') -and
     $null -ne $health.features -and
     $health.features.envAdmin -eq $true -and
     $health.features.modelReasoningProfiles -eq $true -and
@@ -78,7 +82,7 @@ function Start-ResponsesProxy {
     [string]$EnvKey
   )
 
-  if (Test-ProviderProxyReady -Provider $Provider -Port $Port -ExpectedSourceSha256 $script:ExpectedProxySourceSha256) {
+  if (Test-ProviderProxyReady -Provider $Provider -Port $Port -ExpectedSourceSha256 $script:ExpectedProxySourceSha256 -ExpectedRuntimeRoot $RepoRoot) {
     return
   }
 
@@ -133,7 +137,7 @@ function Start-ResponsesProxy {
 
   for ($i = 0; $i -lt 20; $i++) {
     Start-Sleep -Milliseconds 250
-    if (Test-ProviderProxyReady -Provider $Provider -Port $Port -ExpectedSourceSha256 $script:ExpectedProxySourceSha256) {
+    if (Test-ProviderProxyReady -Provider $Provider -Port $Port -ExpectedSourceSha256 $script:ExpectedProxySourceSha256 -ExpectedRuntimeRoot $RepoRoot) {
       return
     }
   }

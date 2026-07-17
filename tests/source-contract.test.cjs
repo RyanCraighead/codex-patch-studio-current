@@ -106,12 +106,17 @@ test("managed runtime bridges reject stale source processes after rebuilds", () 
   assert.match(catalogLauncher, /ExpectedRuntimeSourceHash/);
   assert.match(catalogLauncher, /ExpectedUpstreamCli/);
   assert.match(importManager, /importManagerSourceSha256/);
+  assert.match(importManager, /runtimeRoot: rootDir/);
   assert.match(importLauncher, /Test-ImportManagerReady/);
+  assert.match(importLauncher, /ExpectedRuntimeRoot/);
   assert.match(providerProxy, /proxySourceSha256/);
+  assert.match(providerProxy, /runtimeRoot/);
   assert.match(providerLauncher, /ExpectedProxySourceSha256/);
+  assert.match(providerLauncher, /ExpectedRuntimeRoot/);
   assert.match(runtimeVerifier, /Import manager is running stale source code/);
   assert.match(runtimeVerifier, /Patch manager is running stale source code/);
   assert.match(runtimeVerifier, /proxy is running stale source code/);
+  assert.match(runtimeVerifier, /belongs to a different patcher runtime/);
   assert.match(runtimeVerifier, /catalog shim is running stale source code/);
 });
 

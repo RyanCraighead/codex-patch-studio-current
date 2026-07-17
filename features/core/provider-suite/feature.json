@@ -15,7 +15,7 @@
     {
       "id": "composer-model-menu",
       "path": "webview/assets/composer-*.js",
-      "includes": "function WO({conversationId:e,hideLabel:t}){",
+      "includes": "composer.toggleFastMode",
       "cardinality": { "exact": 1 }
     },
     {

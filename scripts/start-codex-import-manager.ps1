@@ -34,12 +34,15 @@ function Get-Sha256Hex {
 }
 
 function Test-ImportManagerReady {
-  param([object]$Health, [string]$ExpectedSourceSha256)
+  param([object]$Health, [string]$ExpectedSourceSha256, [string]$ExpectedRuntimeRoot)
   return (
     $null -ne $Health -and
     $Health.ok -eq $true -and
     [string]$Health.service -eq "codex-import-manager" -and
-    [string]$Health.sourceSha256 -eq $ExpectedSourceSha256
+    [string]$Health.sourceSha256 -eq $ExpectedSourceSha256 -and
+    [string]$Health.runtimeRoot -and
+    [System.IO.Path]::GetFullPath([string]$Health.runtimeRoot).TrimEnd('\') -ieq
+      [System.IO.Path]::GetFullPath($ExpectedRuntimeRoot).TrimEnd('\')
   )
 }
 
@@ -63,7 +66,7 @@ if (-not (Test-Path -LiteralPath $ViewerScript)) {
 
 $expectedSourceSha256 = Get-Sha256Hex -Path $ViewerScript
 
-if (Test-ImportManagerReady -Health (Get-ImportManagerHealth) -ExpectedSourceSha256 $expectedSourceSha256) {
+if (Test-ImportManagerReady -Health (Get-ImportManagerHealth) -ExpectedSourceSha256 $expectedSourceSha256 -ExpectedRuntimeRoot $RepoRoot) {
   return
 }
 
@@ -71,7 +74,7 @@ Stop-StaleImportManager
 Start-Sleep -Milliseconds 250
 
 $healthAfterStop = Get-ImportManagerHealth
-if (Test-ImportManagerReady -Health $healthAfterStop -ExpectedSourceSha256 $expectedSourceSha256) {
+if (Test-ImportManagerReady -Health $healthAfterStop -ExpectedSourceSha256 $expectedSourceSha256 -ExpectedRuntimeRoot $RepoRoot) {
   return
 }
 
@@ -96,7 +99,7 @@ Start-Process `
 
 for ($i = 0; $i -lt 20; $i++) {
   Start-Sleep -Milliseconds 250
-  if (Test-ImportManagerReady -Health (Get-ImportManagerHealth) -ExpectedSourceSha256 $expectedSourceSha256) {
+  if (Test-ImportManagerReady -Health (Get-ImportManagerHealth) -ExpectedSourceSha256 $expectedSourceSha256 -ExpectedRuntimeRoot $RepoRoot) {
     return
   }
 }

@@ -886,6 +886,8 @@ function patchComposerProviderModels(extractDir) {
   const oldHelperMarker = "function cm(e){";
   const currentHelperMarker = "function FE({conversationId:e,hideLabel:t}){";
   const latestHelperMarker = "function WO({conversationId:e,hideLabel:t}){";
+  const currentPermissionsHelperMarker =
+    "function lk({conversationId:e,hideLabel:t,permissionsCwdOverride:n,permissionsHostId:r}){";
   const helper = [
     "function cpsProviderCatalog(e,t){",
     "let n=t?.config??t??{},r=String(n.model_provider??``).trim(),a={openai:[`gpt-5.5`,`gpt-5.4`,`gpt-5.4-mini`,`gpt-5.3-codex-spark`],deepseek:[`deepseek-v4-flash`,`deepseek-v4-pro`,`deepseek-chat`,`deepseek-reasoner`],zai:[`glm-5.2`,`glm-5.1`,`glm-5`,`glm-4.7`,`glm-4.6`,`glm-4.5`],dashscope:[`qwen3.7-plus`,`qwen3.7-plus-2026-05-26`,`qwen3.7-max`,`qwen3.7-max-2026-06-08`,`qwen3.6-plus`,`qwen3.6-plus-2026-04-02`,`qwen3.6-max-preview`,`qwen3.6-flash`,`qwen3.6-27b`,`qwen3.5-plus`,`qwen3.5-plus-2026-04-20`,`qwen3.5-flash`,`qwen3.5-27b`,`qwen3-max`,`qwen3-max-2026-01-23`,`qwen-plus`,`qwen-plus-2025-12-01`,`qwen-plus-us`,`qwen-plus-2025-12-01-us`,`qwen-plus-character`,`qwen-flash`,`qwen-flash-2025-07-28`,`qwen-flash-us`,`qwen-flash-2025-07-28-us`,`qwen3-coder-next`,`qwen3-coder-plus`,`qwen3-coder-plus-2025-09-23`,`qwen3-coder-flash`,`qwen3-coder-flash-2025-07-28`],cerebras:[`gemma-4-31b`,`gpt-oss-120b`,`zai-glm-4.7`],ollama:[`qwen3:4b`,`gpt-oss:20b`,`qwen3-coder:latest`,`devstral:latest`,`llama3.3:latest`],lmstudio:[`openai/gpt-oss-20b`,`qwen/qwen3-coder`,`devstral-small-2507`]},i={openai:`OpenAI`,deepseek:`DeepSeek`,zai:`Z.ai`,dashscope:`Alibaba Qwen`,cerebras:`Cerebras`,ollama:`Ollama`,lmstudio:`LM Studio`};",
@@ -996,6 +998,37 @@ function patchComposerProviderModels(extractDir) {
       next = patched.text;
       patches.push({ label, count: patched.count });
     }
+  } else if (next.includes(currentPermissionsHelperMarker)) {
+    let patched = replaceExactly(
+      next,
+      currentPermissionsHelperMarker,
+      `${helper}${currentPermissionsHelperMarker}`,
+      "current permissions composer provider catalog helper"
+    );
+    next = patched.text;
+    patches.push({ label: "current permissions composer provider catalog helper", count: patched.count });
+
+    patched = replaceExactly(
+      next,
+      "{data:m,status:h}=So({hostId:s.hostId}),g=m?.models,{modelSettings:y,selectComposerModelAndReasoningEffort:b}=OO({conversationId:e,cwdOverride:n,hostId:r}),x=y.model;_(Wi,e);let{data:S}=_(to,{cwd:s.cwd,hostId:s.hostId}),{serviceTierSettings:C",
+      "{data:m,status:h}=So({hostId:s.hostId}),{modelSettings:y,selectComposerModelAndReasoningEffort:b}=OO({conversationId:e,cwdOverride:n,hostId:r});_(Wi,e);let{data:S}=_(to,{cwd:s.cwd,hostId:s.hostId}),g=cpsProviderCatalog(m?.models,S),x=cpsSelectedModel(y.model),{serviceTierSettings:C",
+      "current permissions composer provider model catalog source"
+    );
+    next = patched.text;
+    patches.push({ label: "current permissions composer provider model catalog source", count: patched.count });
+
+    const currentPermissionsSelectPattern =
+      /function Te\(t,n\)\{return b\(t,n,\(\)=>\{(t===x\?[\s\S]*?\{id:`composer\.modelChangeDuringConversationWarning\.\$\{e\}`\}\))\}\)\}/g;
+    const currentPermissionsSelectReplacement =
+      "function Te(t,n){let r=_o(g,t)?.providerId,a=globalThis.__codexNativeProviderSettings?.selectModelFromNativeMenu?.({model:t,providerId:r,reasoningEffort:n}),o=()=>b(t,n,()=>{$1});return a&&typeof a.then===`function`?a.then(o).catch(o):o()}";
+    patched = replaceRegexExactly(
+      next,
+      currentPermissionsSelectPattern,
+      currentPermissionsSelectReplacement,
+      "current permissions composer provider switch"
+    );
+    next = patched.text;
+    patches.push({ label: "current permissions composer provider switch", count: patched.count });
   } else {
     throw new Error(`Unsupported chat composer shape: ${path.basename(assetPath)}`);
   }
@@ -1013,11 +1046,12 @@ function patchComposerProviderModels(extractDir) {
       next.includes("codex-native-auto-router-settings:v1") &&
       next.includes("cpsSelectedModel") &&
       next.includes("selectModelFromNativeMenu") &&
-      (next.includes("providerId:r?.providerId") || next.includes("providerId:i")) &&
+      (next.includes("providerId:r?.providerId") || next.includes("providerId:i") || next.includes("providerId:r")) &&
       (next.includes("cpsProviderCatalog(l?.models,m)") ||
         next.includes("cpsProviderCatalog(o?.models,u)") ||
-        next.includes("cpsProviderCatalog(d?.models,b)")) &&
-      (next.includes("models:U") || next.includes("models:c") || next.includes("models:m")),
+        next.includes("cpsProviderCatalog(d?.models,b)") ||
+        next.includes("cpsProviderCatalog(m?.models,S)")) &&
+      (next.includes("models:U") || next.includes("models:c") || next.includes("models:m") || next.includes("models:g")),
   };
 }
 
@@ -2270,7 +2304,8 @@ function verifyPackedAsar(asarPath, workRoot, options = {}) {
       composerText.includes("selectModelFromNativeMenu") &&
       ((composerText.includes("providerId:r?.providerId") && composerText.includes("cpsProviderCatalog(l?.models,m)")) ||
         (composerText.includes("providerId:i") && composerText.includes("cpsProviderCatalog(o?.models,u)") && composerText.includes("models:c")) ||
-        (composerText.includes("providerId:i") && composerText.includes("cpsProviderCatalog(d?.models,b)") && composerText.includes("models:m"))),
+        (composerText.includes("providerId:i") && composerText.includes("cpsProviderCatalog(d?.models,b)") && composerText.includes("models:m")) ||
+        (composerText.includes("providerId:r") && composerText.includes("cpsProviderCatalog(m?.models,S)") && composerText.includes("models:g"))),
     containsReasoningSummaryRenderingPatch:
       localConversationThreadText.includes("function cpReasoningContent") &&
       localConversationThreadText.includes("cpContent=cpReasoningContent(n)") &&

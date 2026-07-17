@@ -235,6 +235,9 @@ async function main() {
       if (!sameHash(health.sourceSha256, expectedProviderProxySha256)) {
         fail(`${provider} proxy is running stale source code.`);
       }
+      if (!samePath(health.runtimeRoot, root)) {
+        fail(`${provider} proxy belongs to a different patcher runtime.`);
+      }
       if (requireProviderKeys && health.hasApiKey !== true) fail(`${provider} API key is not available to its proxy.`);
       return {
         provider,
@@ -242,6 +245,7 @@ async function main() {
         ok: health.ok === true,
         hasApiKey: health.hasApiKey === true,
         sourceSha256: health.sourceSha256,
+        runtimeRoot: health.runtimeRoot,
       };
     }),
   ]);
@@ -251,8 +255,14 @@ async function main() {
   if (!sameHash(imports.sourceSha256, expectedImportManagerSha256)) {
     fail("Import manager is running stale source code.");
   }
+  if (!samePath(imports.runtimeRoot, root)) {
+    fail("Import manager belongs to a different patcher runtime.");
+  }
   if (!sameHash(patcher.patchManagerSourceSha256, expectedPatchManagerSha256)) {
     fail("Patch manager is running stale source code.");
+  }
+  if (!samePath(patcher.runtimePaths?.repoRoot, root)) {
+    fail("Patch manager belongs to a different patcher runtime.");
   }
   if (featureDevelopment.ok !== true || !Array.isArray(featureDevelopment.modules)) {
     fail("Feature Development bridge returned an invalid catalog.");
